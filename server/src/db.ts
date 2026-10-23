@@ -1,0 +1,29 @@
+import mongoose from 'mongoose';
+import fs from 'node:fs';
+import { config } from './config';
+
+let memoryServer: import('mongodb-memory-server').MongoMemoryServer | null = null;
+
+export async function connectDb(): Promise<void> {
+  let uri = config.mongoUri;
+
+  if (!uri) {
+    // Local/dev: start a persistent in-memory MongoDB stored under server/.data
+    const { MongoMemoryServer } = await import('mongodb-memory-server');
+    const dbPath = `${config.dataDir}/mongo`;
+    fs.mkdirSync(dbPath, { recursive: true });
+    memoryServer = await MongoMemoryServer.create({
+      instance: { dbPath, storageEngine: 'wiredTiger' },
+    });
+    uri = memoryServer.getUri('readyforge');
+    console.log(`[db] MONGODB_URI not set — using local MongoDB at ${dbPath}`);
+  }
+
+  await mongoose.connect(uri);
+  console.log('[db] connected');
+}
+
+export async function disconnectDb(): Promise<void> {
+  await mongoose.disconnect();
+  if (memoryServer) await memoryServer.stop();
+}

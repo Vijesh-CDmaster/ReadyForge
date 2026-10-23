@@ -1,0 +1,19 @@
+{
+  "name": "readyforge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ReadyForge — AI Production-Readiness Operating System",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,magenta \"npm run dev -w server\" \"npm run dev -w client\"",
+    "build": "npm run build -w server && npm run build -w client",
+    "seed": "npm run seed -w server",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w client"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

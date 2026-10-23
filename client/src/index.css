@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply antialiased;
+  }
+  body {
+    @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
+  }
+  ::selection {
+    @apply bg-brand-500/30;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900;
+  }
+  .input-base {
+    @apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition
+      placeholder:text-slate-400 focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20
+      disabled:cursor-not-allowed disabled:bg-slate-100 dark:border-slate-700 dark:bg-slate-900
+      dark:placeholder:text-slate-500 dark:disabled:bg-slate-800;
+  }
+}
