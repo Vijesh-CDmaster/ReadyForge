@@ -21,6 +21,8 @@ export const config = {
     baseUrl: (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
     model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
   },
+  // Local trained-model service (../ai-service, FastAPI). Empty = disabled.
+  localAiUrl: (process.env.LOCAL_AI_URL || '').replace(/\/+$/, ''),
   upload: {
     dir: path.resolve(__dirname, '..', 'uploads'),
     maxMb: num(process.env.MAX_UPLOAD_MB, 25),

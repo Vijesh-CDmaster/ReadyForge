@@ -14,6 +14,8 @@ import { conflictsRouter } from './routes/conflicts';
 import { assetsRouter } from './routes/assets';
 import { aiRouter } from './routes/ai';
 import { notificationsRouter } from './routes/notifications';
+import { generationRouter } from './routes/generation';
+import { analyticsRouter } from './routes/analytics';
 
 export function createApp() {
   const app = express();
@@ -43,6 +45,8 @@ export function createApp() {
   app.use('/api', assetsRouter);
   app.use('/api/ai', aiRouter);
   app.use('/api/notifications', notificationsRouter);
+  app.use('/api', generationRouter);
+  app.use('/api', analyticsRouter);
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Endpoint not found' }));
   app.use(errorHandler);

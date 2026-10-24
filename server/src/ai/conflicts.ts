@@ -1,4 +1,5 @@
 import { aiJson } from './client';
+import { localAiEnabled, localConflictBatch, LocalConflictResult } from './local';
 import { IKnowledgeInput } from '../models/KnowledgeInput';
 import { ConflictType } from '../models/Conflict';
 
@@ -60,7 +61,20 @@ Do not invent facts. Only flag issues supported by the provided inputs. Return [
       recommendedResolverRole: c.recommendedResolverRole || RESOLVER_BY_TYPE[c.conflictType] || 'lead',
       relatedInputIds: Array.isArray(c.relatedInputIds) ? c.relatedInputIds : [],
     }));
-  return { conflicts, source: result.source, model: result.model };
+
+  // Trained-model pass: our own DistilBERT NLI model (fine-tuned on MNLI) scores every
+  // input pair for semantic contradiction, catching conflicts keyword rules and the LLM miss.
+  const nliFound = await nliDetectConflicts(inputs, conflicts);
+  if (nliFound.length) conflicts.push(...nliFound);
+
+  const source: 'ai' | 'rule_engine' = nliFound.length ? 'ai' : result.source;
+  const model =
+    nliFound.length > 0
+      ? result.source === 'ai'
+        ? `${result.model} + readyforge-nli-distilbert`
+        : 'readyforge-nli-distilbert'
+      : result.model;
+  return { conflicts, source, model };
 }
 
 /* ---------------- deterministic fallbacks ---------------- */
@@ -152,4 +166,106 @@ function push(list: DetectedConflict[], seen: Set<string>, c: DetectedConflict):
   if (seen.has(k)) return;
   seen.add(k);
   list.push(c);
+}
+
+/* ---------------- trained-model detection (local DistilBERT NLI) ---------------- */
+
+/**
+ * Input types that are about the same concern, so comparing them for contradiction
+ * makes sense. Comparing across groups produced false positives in production
+ * ("Brand colours" vs a performance claim shares the brand noun and read as
+ * contradictory), because two statements about different attributes of the same
+ * product are not comparable claims.
+ */
+const COMPATIBLE_TYPE_GROUPS: Record<string, string> = {
+  fact: 'factual',
+  claim: 'factual',
+  price: 'factual',
+  goal: 'offer',
+  constraint: 'offer',
+  audience: 'audience',
+  tone: 'brand',
+  visual_rule: 'brand',
+  legal_rule: 'rights',
+  asset_requirement: 'rights',
+  other: 'other',
+};
+
+function comparableTypes(a: IKnowledgeInput, b: IKnowledgeInput): boolean {
+  const ga = COMPATIBLE_TYPE_GROUPS[a.type];
+  const gb = COMPATIBLE_TYPE_GROUPS[b.type];
+  return Boolean(ga && ga === gb);
+}
+
+function conflictTypeForInputs(a: IKnowledgeInput, b: IKnowledgeInput): ConflictType {
+  const types = new Set([a.type, b.type]);
+  if (types.has('price')) return 'pricing';
+  if (types.has('claim') || types.has('fact')) return 'factual';
+  if (types.has('audience')) return 'audience';
+  if (types.has('tone')) return 'tone';
+  if (types.has('visual_rule')) return 'brand';
+  if (types.has('legal_rule') || types.has('asset_requirement')) return 'rights';
+  return 'goal';
+}
+
+/**
+ * Scores every active input pair with the locally trained NLI model in one batch.
+ * Only pairs not already flagged by the primary path are returned. Fail-soft: returns
+ * [] when LOCAL_AI_URL is unset or the service is down.
+ */
+async function nliDetectConflicts(
+  inputs: IKnowledgeInput[],
+  existing: DetectedConflict[]
+): Promise<DetectedConflict[]> {
+  if (!localAiEnabled()) return [];
+  const active = inputs.filter((i) => i.status !== 'rejected' && i.status !== 'expired');
+  if (active.length < 2) return [];
+
+  const pairKey = (a: string, b: string) => [a, b].sort().join('|');
+  const covered = new Set<string>();
+  for (const c of existing) {
+    if (c.relatedInputIds.length === 2) covered.add(pairKey(c.relatedInputIds[0], c.relatedInputIds[1]));
+  }
+
+  const pairs: Array<{ id: string; a: string; b: string }> = [];
+  const byId = new Map<string, [IKnowledgeInput, IKnowledgeInput]>();
+  for (let i = 0; i < active.length && pairs.length < 200; i++) {
+    for (let j = i + 1; j < active.length && pairs.length < 200; j++) {
+      const a = active[i];
+      const b = active[j];
+      const id = pairKey(a._id.toString(), b._id.toString());
+      if (covered.has(id) || byId.has(id)) continue;
+      if (!comparableTypes(a, b)) continue;
+      const textA = `${a.title}. ${a.content}`.trim().slice(0, 600);
+      const textB = `${b.title}. ${b.content}`.trim().slice(0, 600);
+      if (!textA || !textB || textA === textB) continue;
+      pairs.push({ id, a: textA, b: textB });
+      byId.set(id, [a, b]);
+    }
+  }
+  if (!pairs.length) return [];
+
+  const res = await localConflictBatch(pairs);
+  if (!res || !Array.isArray(res.results)) return [];
+
+  return res.results
+    .filter((r): r is LocalConflictResult => Boolean(r && r.id && byId.has(r.id)))
+    .filter((r) => r.is_conflict)
+    .map((r) => {
+      const [a, b] = byId.get(r.id!)!;
+      const score = r.scores?.contradiction ?? 0;
+      const type = conflictTypeForInputs(a, b);
+      return {
+        title: `Contradiction: "${a.title}" vs "${b.title}"`,
+        description:
+          `The local contradiction model (DistilBERT fine-tuned on MNLI) scores these inputs as contradictory ` +
+          `(p=${score.toFixed(2)}): "${a.title}" (${a.content}) conflicts with "${b.title}" (${b.content}).`,
+        severity: (score >= 0.92 ? 'high' : score >= 0.78 ? 'medium' : 'low') as DetectedConflict['severity'],
+        conflictType: type,
+        relatedInputIds: [a._id.toString(), b._id.toString()],
+        recommendedResolverRole: RESOLVER_BY_TYPE[type],
+        recommendedAction: 'Decide the authoritative statement, then approve one input and reject the other.',
+        impactIfUnresolved: 'Generated content would mix contradictory statements and fail verification.',
+      };
+    });
 }

@@ -406,10 +406,8 @@ projectsRouter.post(
     const { draft, source, model } = await buildContractDraft({ project, inputs, assets, conflicts });
 
     const previous = await ProductionContract.findOne({ projectId: project._id, status: { $ne: 'superseded' } }).sort('-version');
-    if (previous) {
-      previous.status = 'superseded';
-      await previous.save();
-    }
+    // Number from the highest version ever issued (incl. superseded), so versions never repeat.
+    const latestEver = await ProductionContract.findOne({ projectId: project._id }).sort('-version');
 
     const approvedClaimIds = inputs
       .filter((i) => i.type === 'claim' && i.status === 'approved')
@@ -421,7 +419,7 @@ projectsRouter.post(
     const contract = await ProductionContract.create({
       projectId: project._id,
       workspaceId: ws._id,
-      version: (previous?.version || 0) + 1,
+      version: (latestEver?.version || 0) + 1,
       status: 'pending_approval',
       objective: draft.objective,
       audience: draft.audience,
@@ -440,6 +438,13 @@ projectsRouter.post(
       requiredApprovals: [],
       createdById: req.user!._id,
     });
+
+    // Only supersede the old contract once its replacement exists, so a failed
+    // create can never leave the project without a current contract.
+    if (previous) {
+      previous.status = 'superseded';
+      await previous.save();
+    }
 
     const approvers = requiredApproversFor(project, ws.members.filter((m) => m.status === 'active').map((m) => ({ userId: m.userId, role: m.role })));
     contract.requiredApprovals = approvers.map((a) => ({

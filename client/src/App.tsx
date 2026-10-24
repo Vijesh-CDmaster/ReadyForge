@@ -21,6 +21,13 @@ import ReadinessDashboard from './pages/ReadinessDashboard';
 import CostAtRiskDashboard from './pages/CostAtRiskDashboard';
 import ContractPage from './pages/ContractPage';
 import NotificationsPage from './pages/NotificationsPage';
+import DraftLadder from './pages/DraftLadder';
+import ScriptEditor from './pages/ScriptEditor';
+import StoryboardEditor from './pages/StoryboardEditor';
+import VerificationReportPage from './pages/VerificationReportPage';
+import ProvenancePage from './pages/ProvenancePage';
+import AnalyticsPage from './pages/AnalyticsPage';
+import SettingsPage from './pages/SettingsPage';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, status } = useAuthStore();
@@ -56,6 +63,8 @@ export default function App() {
         <Route path="workspaces/:workspaceId" element={<WorkspaceDetail />} />
         <Route path="projects/new" element={<CreateProject />} />
         <Route path="notifications" element={<NotificationsPage />} />
+        <Route path="workspaces/:workspaceId/analytics" element={<AnalyticsPage />} />
+        <Route path="workspaces/:workspaceId/settings" element={<SettingsPage />} />
 
         <Route path="projects/:projectId" element={<ProjectLayout />}>
           <Route index element={<ProjectOverview />} />
@@ -67,6 +76,11 @@ export default function App() {
           <Route path="readiness" element={<ReadinessDashboard />} />
           <Route path="risk" element={<CostAtRiskDashboard />} />
           <Route path="contract" element={<ContractPage />} />
+          <Route path="ladder" element={<DraftLadder />} />
+          <Route path="script" element={<ScriptEditor />} />
+          <Route path="storyboard" element={<StoryboardEditor />} />
+          <Route path="verification" element={<VerificationReportPage />} />
+          <Route path="provenance" element={<ProvenancePage />} />
         </Route>
       </Route>
 

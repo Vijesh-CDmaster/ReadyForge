@@ -1,4 +1,5 @@
 import { aiJson } from './client';
+import { localAiEnabled, localVerify } from './local';
 import { IKnowledgeInput } from '../models/KnowledgeInput';
 
 export interface ClaimCheck {
@@ -48,7 +49,63 @@ Return a JSON array: { claim, status, evidence, sourceInputId (or null), saferRe
         ? c.status
         : 'unsupported') as ClaimCheck['status'],
     }));
-  return { checks, source: result.source, model: result.model };
+
+  // Re-check each claim with our own trained NLI model (DistilBERT fine-tuned on MNLI):
+  // entailment against an approved fact promotes the claim, contradiction demotes it.
+  const usedLocal = await applyLocalVerification(checks, approvedFacts);
+  const model = usedLocal
+    ? result.source === 'ai'
+      ? `${result.model} + readyforge-nli-distilbert`
+      : 'readyforge-nli-distilbert'
+    : result.model;
+  return { checks, source: usedLocal ? 'ai' : result.source, model };
+}
+
+/**
+ * Verifies claims against the best matching approved fact using the local model.
+ * Fail-soft: returns false as soon as the service is unavailable.
+ */
+async function applyLocalVerification(checks: ClaimCheck[], facts: IKnowledgeInput[]): Promise<boolean> {
+  if (!localAiEnabled() || !checks.length || !facts.length) return false;
+  const approved = facts.filter((f) => f.status === 'approved');
+  const pool = approved.length ? approved : facts;
+  let used = false;
+
+  for (const check of checks.slice(0, 20)) {
+    let fact = check.sourceInputId ? pool.find((f) => f._id.toString() === check.sourceInputId) : undefined;
+    if (!fact) fact = bestFactFor(check.claim, pool);
+    if (!fact) continue;
+
+    const verdict = await localVerify(check.claim, `${fact.title}. ${fact.content}`);
+    if (!verdict) return used;
+    used = true;
+
+    if (verdict.verdict === 'supported') {
+      check.status = 'verified';
+      check.evidence = `Supported by approved fact: "${fact.title}" — ${fact.content}`;
+      check.sourceInputId = fact._id.toString();
+      delete check.saferRewrite;
+    } else if (verdict.verdict === 'refuted') {
+      check.status = 'unsupported';
+      check.evidence = `The verification model contradicts the approved fact "${fact.title}" — ${fact.content}.`;
+      check.sourceInputId = fact._id.toString();
+      if (!check.saferRewrite) check.saferRewrite = rewriteUsing(check.claim, [fact]);
+    }
+    // not_enough_evidence: keep whatever the primary path decided
+  }
+  return used;
+}
+
+function bestFactFor(claim: string, facts: IKnowledgeInput[]): IKnowledgeInput | undefined {
+  const claimTokens = tokenize(claim);
+  let best: { score: number; fact?: IKnowledgeInput } = { score: 0 };
+  for (const fact of facts) {
+    const factTokens = tokenize(`${fact.title} ${fact.content}`);
+    if (!factTokens.length) continue;
+    const score = claimTokens.filter((t) => factTokens.includes(t)).length / factTokens.length;
+    if (score > best.score) best = { score, fact };
+  }
+  return best.fact;
 }
 
 function claimsFallback(content: string, approvedFacts: IKnowledgeInput[]): ClaimCheck[] {

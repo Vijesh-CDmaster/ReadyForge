@@ -70,6 +70,11 @@ export default function ProjectLayout() {
     { to: `${base}/readiness`, label: 'Readiness' },
     { to: `${base}/risk`, label: 'Cost at Risk' },
     { to: `${base}/contract`, label: 'Contract' },
+    { to: `${base}/ladder`, label: 'Draft ladder' },
+    { to: `${base}/script`, label: 'Script' },
+    { to: `${base}/storyboard`, label: 'Storyboard' },
+    { to: `${base}/verification`, label: 'Verify' },
+    { to: `${base}/provenance`, label: 'Provenance' },
   ];
 
   return (

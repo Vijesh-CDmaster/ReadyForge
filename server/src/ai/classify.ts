@@ -1,5 +1,6 @@
 import { aiJson } from './client';
-import { ProjectType } from '../models/Project';
+import { localAiEnabled, localClassify } from './local';
+import { ProjectType, PROJECT_TYPES } from '../models/Project';
 
 export interface Classification {
   projectType: ProjectType;
@@ -24,7 +25,32 @@ const REQUIRED_BY_TYPE: Record<string, string[]> = {
 
 const OPTIONAL_BY_TYPE: string[] = ['tone', 'deadline', 'localisation', 'accessibility_requirements'];
 
+/**
+ * Classification runs in three stages:
+ *   1. Deterministic keyword rules — high precision for explicit requests.
+ *   2. Our trained model (DistilBERT fine-tuned on MNLI) as zero-shot classifier,
+ *      used when the rules have no signal. This is where a learned model earns its
+ *      keep: vague descriptions that keywords cannot map.
+ *   3. The local LLM (and rules as its fallback).
+ */
 export async function classifyProject(description: string): Promise<AiResultLike<Classification>> {
+  const ruleType = ruleProjectType(description);
+  if (ruleType) {
+    return { data: classifyFallback(description, ruleType), source: 'rule_engine', model: 'readyforge-rules' };
+  }
+
+  if (localAiEnabled()) {
+    const local = await localClassify(description, PROJECT_TYPES, 'This content request is for {label}.');
+    const top = local?.ranked?.[0];
+    if (local && top && top.score >= 0.4) {
+      return {
+        data: classifyFallback(description, top.label as ProjectType),
+        source: 'ai',
+        model: 'readyforge-nli-distilbert',
+      };
+    }
+  }
+
   return aiJson<Classification>({
     system: `You are ReadyForge's Project Classifier.
 Classify the user's content request and identify missing information.
@@ -40,15 +66,21 @@ Do not invent facts. If information is missing, list it as missing (empty arrays
 
 type AiResultLike<T> = Awaited<ReturnType<typeof aiJson<T>>>;
 
-function classifyFallback(description: string): Classification {
+/** Returns the project type when a keyword pattern matches, otherwise null (no signal). */
+function ruleProjectType(description: string): ProjectType | null {
   const text = description.toLowerCase();
-  let projectType: ProjectType = 'custom';
-  if (/\b(ad|advertisement|commercial|30[- ]?sec|15[- ]?sec|20[- ]?sec)\b/.test(text)) projectType = 'ad';
-  else if (/\b(video|reel|short|promo|animatic|trailer)\b/.test(text)) projectType = 'video';
-  else if (/\b(post|linkedin|instagram|tweet|thread|caption)\b/.test(text)) projectType = 'social_post';
-  else if (/\b(blog|article|essay|seo)\b/.test(text)) projectType = 'blog';
-  else if (/\b(presentation|deck|slide|pitch)\b/.test(text)) projectType = 'presentation';
-  else if (/\b(landing page|landing|squeeze page)\b/.test(text)) projectType = 'landing_page';
+  if (/\b(ad|advertisement|commercial|30[- ]?sec|15[- ]?sec|20[- ]?sec)\b/.test(text)) return 'ad';
+  if (/\b(video|reel|short|promo|animatic|trailer)\b/.test(text)) return 'video';
+  if (/\b(post|linkedin|instagram|tweet|thread|caption)\b/.test(text)) return 'social_post';
+  if (/\b(blog|article|essay|seo)\b/.test(text)) return 'blog';
+  if (/\b(presentation|deck|slide|pitch)\b/.test(text)) return 'presentation';
+  if (/\b(landing page|landing|squeeze page)\b/.test(text)) return 'landing_page';
+  return null;
+}
+
+function classifyFallback(description: string, forcedType?: ProjectType): Classification {
+  const text = description.toLowerCase();
+  const projectType: ProjectType = forcedType ?? ruleProjectType(description) ?? 'custom';
 
   const durMatch = description.match(/(\d+)\s*(?:second|sec|s)\b/);
   const estimatedDurationSeconds = durMatch && projectType === 'ad' ? Number(durMatch[1]) : null;

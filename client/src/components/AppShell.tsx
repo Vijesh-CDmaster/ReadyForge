@@ -12,6 +12,8 @@ import {
   ChevronDown,
   Menu,
   X,
+  BarChart3,
+  Settings,
 } from 'lucide-react';
 import { useAuthStore } from '../store/auth';
 import { api } from '../lib/api';
@@ -70,6 +72,12 @@ export function AppShell() {
     { to: '/app', label: 'Dashboard', icon: LayoutDashboard, end: true },
     { to: '/app/projects/new', label: 'New project', icon: Plus },
     { to: '/app/notifications', label: 'Notifications', icon: Bell },
+    ...(activeWs
+      ? [
+          { to: `/app/workspaces/${activeWs}/analytics`, label: 'Analytics', icon: BarChart3 },
+          { to: `/app/workspaces/${activeWs}/settings`, label: 'Settings', icon: Settings },
+        ]
+      : []),
   ];
 
   const activeWorkspace = workspaces.find((w) => w.id === activeWs);
