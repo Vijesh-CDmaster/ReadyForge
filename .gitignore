@@ -8,3 +8,10 @@ server/uploads/*
 server/.data/
 *.log
 .DS_Store
+
+# Python and model-training artifacts
+**/__pycache__/
+*.py[cod]
+ai-service/data/
+ai-service/models/
+client/tsconfig.tsbuildinfo
