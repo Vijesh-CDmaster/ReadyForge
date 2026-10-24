@@ -59,14 +59,42 @@ export async function generateOutline(
   project: IProject,
   contract: IProductionContract
 ): Promise<AiResult<{ outline: string[] }>> {
-  return aiJson<{ outline: string[] }>({
+  const out = await aiJson<{ outline: unknown }>({
     system: `You are ReadyForge's Outline Generator.
 Build a content outline for the approved Production Contract.
 Return JSON: { "outline": ["beat 1", "beat 2", ...] } with 5-8 short beats in order.
 Use only the contract facts provided. Do not invent claims, prices or promises.`,
     user: contractFacts(project, contract),
-    fallback: () => outlineFallback(project, contract),
+    fallback: () => outlineFallback(project, contract) as { outline: unknown },
   });
+  // Defensive coercion: small local models sometimes return a stringified array
+  // (or a nested object) — normalise to a clean string[] before persistence.
+  let outline: string[] = [];
+  const raw = out.data?.outline;
+  if (Array.isArray(raw)) {
+    outline = raw
+      .map((b) => (typeof b === 'string' ? b : typeof b === 'object' && b !== null ? Object.values(b).join(': ') : String(b)))
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 12);
+  } else if (typeof raw === 'string' && raw.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        outline = parsed.map((b) => String(b).trim()).filter(Boolean).slice(0, 12);
+      }
+    } catch {
+      outline = [];
+    }
+  } else if (typeof raw === 'string' && raw.trim()) {
+    outline = raw
+      .split(/\n+/)
+      .map((s) => s.replace(/^[-*\d.\s]+/, '').trim())
+      .filter(Boolean)
+      .slice(0, 12);
+  }
+  if (!outline.length) outline = outlineFallback(project, contract).outline;
+  return { data: { outline }, source: out.source, model: out.model };
 }
 
 function outlineFallback(project: IProject, contract: IProductionContract): { outline: string[] } {
@@ -157,7 +185,7 @@ export async function generateStoryboard(
   contract: IProductionContract,
   script: string
 ): Promise<AiResult<{ scenes: SceneDraft[] }>> {
-  return aiJson<{ scenes: SceneDraft[] }>({
+  const out = await aiJson<{ scenes: unknown }>({
     system: `You are ReadyForge's Storyboard Planner.
 Convert the script into storyboard scenes for the approved Production Contract.
 Return JSON: { "scenes": [{ "sceneNumber": 1, "title": "...", "description": "...",
@@ -165,8 +193,37 @@ Return JSON: { "scenes": [{ "sceneNumber": 1, "title": "...", "description": "..
 One scene per script block, in order. Durations must sum to the target duration.
 Visual direction must respect the contract brand rules. Do not invent facts.`,
     user: `${contractFacts(project, contract)}\n\nScript:\n${script}`,
-    fallback: () => storyboardFallback(project, contract, script),
+    fallback: () => storyboardFallback(project, contract, script) as { scenes: unknown },
   });
+
+  // Defensive coercion: accept only well-formed scene objects; otherwise fall back.
+  let raw = out.data?.scenes;
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw) as unknown;
+    } catch {
+      raw = [];
+    }
+  }
+  const scenes: SceneDraft[] = (Array.isArray(raw) ? raw : [])
+    .map((s, i) => {
+      const o = (typeof s === 'object' && s !== null ? s : {}) as Record<string, unknown>;
+      return {
+        sceneNumber: Number(o.sceneNumber) || i + 1,
+        title: String(o.title || '').trim() || `Scene ${i + 1}`,
+        description: String(o.description || '').trim(),
+        visualDirection: String(o.visualDirection || '').trim(),
+        voiceover: String(o.voiceover || '').trim(),
+        durationSeconds: Number(o.durationSeconds) || 0,
+      } as SceneDraft;
+    })
+    .filter((s) => s.title || s.description)
+    .slice(0, 60);
+
+  if (!scenes.length) {
+    return { data: storyboardFallback(project, contract, script), source: out.source, model: out.model };
+  }
+  return { data: { scenes }, source: out.source, model: out.model };
 }
 
 export function storyboardFallback(

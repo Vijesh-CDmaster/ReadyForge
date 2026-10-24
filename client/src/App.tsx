@@ -26,6 +26,7 @@ import ScriptEditor from './pages/ScriptEditor';
 import StoryboardEditor from './pages/StoryboardEditor';
 import VerificationReportPage from './pages/VerificationReportPage';
 import ProvenancePage from './pages/ProvenancePage';
+import CampaignLabPage from './pages/CampaignLabPage';
 import AnalyticsPage from './pages/AnalyticsPage';
 import SettingsPage from './pages/SettingsPage';
 
@@ -80,6 +81,7 @@ export default function App() {
           <Route path="script" element={<ScriptEditor />} />
           <Route path="storyboard" element={<StoryboardEditor />} />
           <Route path="verification" element={<VerificationReportPage />} />
+          <Route path="lab" element={<CampaignLabPage />} />
           <Route path="provenance" element={<ProvenancePage />} />
         </Route>
       </Route>

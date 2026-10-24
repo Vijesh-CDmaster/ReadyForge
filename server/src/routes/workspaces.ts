@@ -31,6 +31,17 @@ const updateSchema = z.object({
       budgetApprovalThreshold: z.number().min(0).optional(),
     })
     .optional(),
+  brandDna: z
+    .object({
+      brandName: z.string().max(200).optional(),
+      tone: z.string().max(400).optional(),
+      bannedWords: z.array(z.string().max(80)).max(60).optional(),
+      colourPalette: z.array(z.string().max(40)).max(20).optional(),
+      logoRules: z.string().max(1000).optional(),
+      targetAudience: z.string().max(1000).optional(),
+      legalRestrictions: z.array(z.string().max(300)).max(30).optional(),
+    })
+    .optional(),
 });
 
 const inviteSchema = z.object({
@@ -139,6 +150,7 @@ workspacesRouter.get(
       description: ws.description,
       ownerId: ws.ownerId.toString(),
       settings: ws.settings,
+      brandDna: ws.brandDna ?? null,
       role: req.membershipRole,
       createdAt: ws.createdAt,
       members: ws.members.filter((m) => m.status !== 'removed').map((m) => serializeMember(m, users)),
@@ -168,6 +180,7 @@ workspacesRouter.patch(
     if (body.name) ws.name = body.name;
     if (body.description !== undefined) ws.description = body.description;
     if (body.settings) ws.settings = { ...ws.settings, ...body.settings };
+    if (body.brandDna) ws.brandDna = { ...(ws.brandDna || ({} as never)), ...body.brandDna } as never;
     await ws.save();
     audit({
       workspaceId: ws._id.toString(),
@@ -176,7 +189,7 @@ workspacesRouter.patch(
       entityType: 'workspace',
       entityId: ws._id.toString(),
       before,
-      after: { name: ws.name, settings: ws.settings },
+      after: { name: ws.name, settings: ws.settings, brandDna: ws.brandDna },
       ipAddress: clientIp(req),
     });
     res.json({ workspace: ws });

@@ -39,6 +39,20 @@ interface TimelineEvent {
   detail: string;
 }
 
+interface ClaimPassport {
+  id: string;
+  claim: string;
+  title: string;
+  status: string;
+  source: string;
+  suppliedBy: string;
+  approvedBy: string | null;
+  approvedAt: string | null;
+  usedIn: string[];
+  model: string | null;
+  verification: { status: string; evidence: string; suggestedFix?: string };
+}
+
 /**
  * Provenance Passport — the downloadable record of who supplied what, what the AI
  * did (model + cost), what humans approved, and the final verification result.
@@ -48,6 +62,12 @@ export default function ProvenancePage() {
   const { data, isLoading, error } = useQuery({
     queryKey: ['provenance', projectId],
     queryFn: () => api.get<ProvenancePayload>(`/api/projects/${projectId}/provenance`),
+    enabled: Boolean(projectId),
+  });
+
+  const { data: passport } = useQuery({
+    queryKey: ['claim-passport', projectId],
+    queryFn: () => api.get<{ claims: ClaimPassport[]; note: string | null }>(`/api/projects/${projectId}/claim-passport`),
     enabled: Boolean(projectId),
   });
 
@@ -229,6 +249,41 @@ export default function ProvenancePage() {
                       {f.title} <Badge tone="neutral">{f.status}</Badge>
                     </p>
                     <p className="text-xs text-slate-600 dark:text-slate-400">{f.content}</p>
+                  </div>
+                ))}
+              </Card>
+            )}
+          </div>
+
+          <div>
+            <SectionTitle title="Claim Passport" subtitle="Every claim traced to its source, approver, usage and verification." />
+            {!passport || passport.claims.length === 0 ? (
+              <Card>
+                <p className="text-sm text-slate-500">{passport?.note || 'No claims recorded in the Knowledge Ledger yet.'}</p>
+              </Card>
+            ) : (
+              <Card className="space-y-3 p-3">
+                {passport.claims.map((c) => (
+                  <div key={c.id} className="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-sm font-semibold">“{c.claim}”</p>
+                      <Badge tone={c.status === 'approved' ? 'success' : c.status === 'rejected' ? 'danger' : 'warning'}>
+                        {c.status}
+                      </Badge>
+                    </div>
+                    <dl className="mt-2 grid gap-1 text-xs text-slate-600 dark:text-slate-400 sm:grid-cols-2">
+                      <div><dt className="inline font-medium text-slate-500">Source: </dt><dd className="inline">{c.source}</dd></div>
+                      <div><dt className="inline font-medium text-slate-500">Supplied by: </dt><dd className="inline">{c.suppliedBy}</dd></div>
+                      <div><dt className="inline font-medium text-slate-500">Approved by: </dt><dd className="inline">{c.approvedBy || '—'}</dd></div>
+                      <div><dt className="inline font-medium text-slate-500">Model: </dt><dd className="inline">{c.model || '—'}</dd></div>
+                      <div className="sm:col-span-2"><dt className="inline font-medium text-slate-500">Used in: </dt><dd className="inline">{c.usedIn.length ? c.usedIn.join(' · ') : 'Not found in current script/storyboard'}</dd></div>
+                    </dl>
+                    <div className="mt-2 rounded-md bg-slate-50 p-2 text-xs dark:bg-slate-900">
+                      <Badge tone={c.verification.status === 'passed' ? 'success' : c.verification.status === 'failed' ? 'danger' : 'warning'}>
+                        {c.verification.status}
+                      </Badge>{' '}
+                      <span className="text-slate-600 dark:text-slate-400">{c.verification.evidence}</span>
+                    </div>
                   </div>
                 ))}
               </Card>

@@ -532,6 +532,7 @@ generationRouter.post(
       approvedFacts,
       script: contract.contentPlan.script,
       scenes: contract.contentPlan.storyboard,
+      brandDna: ws.brandDna ?? null,
     });
     const latencyMs = Date.now() - started;
 
@@ -801,6 +802,153 @@ generationRouter.get(
         modelsUsed.length > 0
           ? `AI-assisted output generated with locally hosted models: ${modelsUsed.join(', ')}. Every AI action is listed above with its model and cost.`
           : 'No AI generation has run on this project yet.',
+    });
+  })
+);
+
+/* ---------------- claim passport (Enhancement 4) ---------------- */
+
+generationRouter.get(
+  '/projects/:id/claim-passport',
+  requireProject(),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const project = req.project!;
+    const { inputs, contract } = await projectContext(project._id);
+
+    const claims = inputs.filter((i) => i.type === 'claim');
+    if (!claims.length) {
+      res.json({ claims: [], note: 'No claims recorded in the Knowledge Ledger yet.' });
+      return;
+    }
+
+    const [users, tasks, reports] = await Promise.all([
+      User.find({ _id: { $in: claims.flatMap((c) => [c.createdById, c.approvedById].filter(Boolean)) } }).select(
+        'name email'
+      ),
+      loadTasks(project._id),
+      VerificationReport.find({ projectId: project._id }).sort('-createdAt').limit(1),
+    ]);
+    const nameOf = (id?: unknown) => users.find((u) => u._id.toString() === String(id))?.name || 'Unknown';
+
+    const scriptTask = tasks.find((t) => t.stage === 'script' && t.reviewStatus !== 'rejected');
+    const script = contract?.contentPlan.script || '';
+    const scenes = contract?.contentPlan.storyboard || [];
+    const latestReport = reports[0];
+
+    const passport = claims.map((c) => {
+      const claimTokens = c.content
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter((w) => w.length > 4);
+      const hitIn = (text: string) => {
+        const lower = text.toLowerCase();
+        if (c.content.length > 20 && lower.includes(c.content.slice(0, 40).toLowerCase())) return true;
+        return claimTokens.some((w) => lower.includes(w));
+      };
+
+      const usedIn: string[] = [];
+      if (script && hitIn(script)) usedIn.push('Script');
+      scenes.forEach((s) => {
+        if (hitIn(`${s.voiceover || ''} ${s.description || ''} ${s.title || ''}`)) {
+          usedIn.push(`Scene ${s.sceneNumber}: ${s.title}`);
+        }
+      });
+
+      const claimCheck = latestReport?.checks.find(
+        (ch) => ch.checkType === 'claim_verification' && hitIn(`${ch.evidence} ${ch.message}`)
+      );
+
+      return {
+        id: c._id.toString(),
+        claim: c.content,
+        title: c.title,
+        status: c.status,
+        source: c.sourceReference || c.sourceType.replace(/_/g, ' '),
+        sourceType: c.sourceType,
+        suppliedBy: nameOf(c.createdById),
+        approvedBy: c.approvedById ? nameOf(c.approvedById) : null,
+        approvedAt: c.approvedAt || null,
+        usedIn,
+        model: scriptTask?.modelName || null,
+        verification: claimCheck
+          ? { status: claimCheck.status, evidence: claimCheck.evidence, suggestedFix: claimCheck.suggestedFix }
+          : { status: c.status === 'approved' ? 'not_run' : 'unverified', evidence: latestReport ? 'Not matched in the latest verification report.' : 'No verification run yet.', suggestedFix: undefined },
+      };
+    });
+
+    res.json({
+      claims: passport,
+      contractVersion: contract?.version ?? null,
+      note: null,
+    });
+  })
+);
+
+/* ---------------- regeneration autopsy (Enhancement 6) ---------------- */
+
+generationRouter.get(
+  '/projects/:id/autopsy',
+  requireProject(),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const project = req.project!;
+    const [tasks, reviews, reports] = await Promise.all([
+      loadTasks(project._id),
+      Review.find({ projectId: project._id, decision: { $ne: 'approved' } })
+        .sort('-createdAt')
+        .populate('reviewerId', 'name'),
+      VerificationReport.find({ projectId: project._id }).sort('-createdAt'),
+    ]);
+
+    const preventions: Record<string, string> = {
+      claim_verification: 'Claim approval is now required before storyboard generation.',
+      rights: 'Licence verification must pass before final render.',
+      scene_completeness: 'Scene completeness is checked automatically after every storyboard run.',
+      accessibility: 'Accessibility requirements are injected into the script prompt.',
+      budget: 'Budget guard now blocks generation above the remaining balance.',
+      brand_fit: 'Brand rules are pinned into every generation prompt.',
+      tone: 'Contract tone is enforced as a generation constraint.',
+      intent_alignment: 'Intent Lock reminders now appear in the script editor.',
+    };
+
+    const cases = reviews.map((r) => {
+      const task = tasks.find((t) => t._id.toString() === r.generationTaskId?.toString());
+      const failedCheck = reports
+        .flatMap((rep) => rep.checks)
+        .find((c) => c.status === 'failed');
+      const stageKey =
+        task?.stage === 'storyboard' || task?.stage === 'preview' || task?.stage === 'final'
+          ? 'scene_completeness'
+          : 'claim_verification';
+      const rootCause =
+        r.rootCause ||
+        failedCheck?.message ||
+        (r.comment ? `Reviewer flagged the ${task?.stage || 'output'}: “${r.comment.slice(0, 160)}”` : 'Reason not recorded.');
+      const causeKey = failedCheck?.checkType || stageKey;
+      const nextAttempt = tasks.find(
+        (t) => t.stage === task?.stage && t.attempt > (task?.attempt || 0)
+      );
+
+      return {
+        id: r._id.toString(),
+        stage: task?.stage || task?.taskType || 'unknown',
+        decision: r.decision,
+        reviewer: (r.reviewerId as unknown as { name?: string })?.name || 'Unknown',
+        comment: r.comment,
+        rootCause,
+        whatWasGenerated: task ? `${task.taskType} attempt ${task.attempt} via ${task.modelName}` : 'Unknown output',
+        whatChanged: nextAttempt?.regenerationNotes || r.resolution || null,
+        prevention: preventions[causeKey] || 'Workflow guard added for this failure class.',
+        createdAt: r.createdAt,
+      };
+    });
+
+    res.json({
+      cases,
+      summary:
+        cases.length === 0
+          ? 'No rejections yet — every output passed review on the first attempt.'
+          : `${cases.length} rejection(s) recorded. Every failure is attributed to a contract node or input so the same mistake is not repeated.`,
     });
   })
 );

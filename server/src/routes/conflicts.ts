@@ -49,6 +49,70 @@ async function serialize(list: Array<Record<string, any>>) {
   }));
 }
 
+/* ---------------- one-click recommendation (Enhancement 3) ---------------- */
+
+/** Authority order per conflict type — the role that legitimately owns the decision. */
+const AUTHORITY: Record<string, string[]> = {
+  pricing: ['finance_owner', 'lead', 'owner'],
+  rights: ['legal_reviewer', 'owner'],
+  factual: ['subject_matter_expert', 'lead', 'owner'],
+  goal: ['lead', 'owner'],
+  brand: ['designer', 'lead', 'owner'],
+  tone: ['writer', 'lead', 'owner'],
+  audience: ['lead', 'owner'],
+  budget: ['finance_owner', 'lead', 'owner'],
+};
+
+interface Recommendation {
+  optionA: { id: string; content: string; creatorRole: string | null } | null;
+  optionB: { id: string; content: string; creatorRole: string | null } | null;
+  recommended: 'A' | 'B' | null;
+  reason: string;
+}
+
+async function computeRecommendation(conflict: import('../models/Conflict').IConflict): Promise<Recommendation> {
+  const [inputA, inputB, ws] = await Promise.all([
+    conflict.inputAId ? KnowledgeInput.findById(conflict.inputAId) : null,
+    conflict.inputBId ? KnowledgeInput.findById(conflict.inputBId) : null,
+    Workspace.findById(conflict.workspaceId),
+  ]);
+  const roleOf = (userId?: unknown) =>
+    ws?.members.find((m) => m.userId.toString() === String(userId) && m.status === 'active')?.role ?? null;
+
+  const optionA = inputA
+    ? { id: String(inputA._id), content: inputA.content, creatorRole: roleOf(inputA.createdById) }
+    : null;
+  const optionB = inputB
+    ? { id: String(inputB._id), content: inputB.content, creatorRole: roleOf(inputB.createdById) }
+    : null;
+  if (!optionA || !optionB) {
+    return { optionA, optionB, recommended: null, reason: conflict.recommendedAction || 'No paired inputs to compare.' };
+  }
+
+  const order = AUTHORITY[conflict.conflictType] || ['lead', 'owner'];
+  const rank = (role: string | null) => (role ? Math.max(0, order.indexOf(role) >= 0 ? order.length - order.indexOf(role) : 0) : 0);
+  // Authority dominates; approval status and supplier confidence break ties
+  // (e.g. two inputs from the same owner — the higher-confidence one wins).
+  const score = (o: NonNullable<Recommendation['optionA']>, input: { status: string; confidence?: number }) =>
+    rank(o.creatorRole) * 10 + (input.status === 'approved' ? 5 : 0) + Math.round((input.confidence ?? 0.5) * 3);
+
+  const sA = score(optionA, inputA!);
+  const sB = score(optionB, inputB!);
+  const recommended: 'A' | 'B' | null = sA === sB ? null : sA > sB ? 'A' : 'B';
+
+  const winner = recommended === 'A' ? optionA : optionB;
+  const reason =
+    recommended === null
+      ? `Both inputs carry equal authority and confidence (${optionA.creatorRole || 'unknown'} vs ${optionB.creatorRole || 'unknown'}) — a human decision is required.`
+      : `Recommended: Option ${recommended} — supplied by the ${winner!.creatorRole || 'member'}${
+          (recommended === 'A' ? inputA! : inputB!).status === 'approved' ? ' and already approved in the ledger' : ''
+        }, the authorised role for ${conflict.conflictType} decisions${
+          rank(optionA.creatorRole) === rank(optionB.creatorRole) ? ', with higher supplier confidence as the tie-break' : ''
+        }. ${conflict.recommendedAction || ''}`.trim();
+
+  return { optionA, optionB, recommended, reason };
+}
+
 /* list */
 conflictsRouter.get(
   '/projects/:id/conflicts',
@@ -135,6 +199,79 @@ conflictsRouter.post(
 
     const all = await Conflict.find({ projectId: project._id }).sort('-createdAt');
     res.json({ conflicts: await serialize(all as never), detectedCount: detected.length, createdCount: created.length, aiSource: source, model });
+  })
+);
+
+/* recommendation (for the one-click resolve UI) */
+conflictsRouter.get(
+  '/conflicts/:id/recommendation',
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const conflict = await Conflict.findById(req.params.id);
+    if (!conflict) throw new ApiError(404, 'Conflict not found');
+    const ws = await Workspace.findById(conflict.workspaceId);
+    const role = ws?.members.find((m) => m.userId.toString() === req.user!._id.toString() && m.status === 'active')?.role;
+    if (!role && req.user!.platformRole !== 'admin') throw new ApiError(403, 'Workspace membership required');
+    res.json(await computeRecommendation(conflict));
+  })
+);
+
+/* one-click accept: resolve with the recommendation, flip both inputs accordingly */
+conflictsRouter.patch(
+  '/conflicts/:id/accept-recommendation',
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const conflict = await Conflict.findById(req.params.id);
+    if (!conflict) throw new ApiError(404, 'Conflict not found');
+    if (['resolved', 'dismissed'].includes(conflict.status)) throw new ApiError(409, 'Conflict already closed');
+
+    const ws = await Workspace.findById(conflict.workspaceId);
+    const role = ws?.members.find((m) => m.userId.toString() === req.user!._id.toString() && m.status === 'active')?.role || 'admin';
+    const isAssignee = conflict.assignedToId?.toString() === req.user!._id.toString();
+    if (!isAssignee && !['owner', 'lead'].includes(role)) {
+      throw new ApiError(403, 'Only the assigned resolver, owner or lead can resolve this conflict');
+    }
+
+    const rec = await computeRecommendation(conflict);
+    if (!rec.recommended || !rec.optionA || !rec.optionB) {
+      throw new ApiError(409, 'No automatic recommendation available — resolve manually with a written decision.');
+    }
+
+    const winnerId = rec.recommended === 'A' ? rec.optionA.id : rec.optionB.id;
+    const loserId = rec.recommended === 'A' ? rec.optionB.id : rec.optionA.id;
+
+    const before = { status: conflict.status };
+    conflict.status = 'resolved';
+    conflict.resolution = `Accepted recommendation (Option ${rec.recommended}): ${rec.reason}`;
+    conflict.resolvedById = req.user!._id as never;
+    conflict.resolvedAt = new Date();
+    await conflict.save();
+
+    const winner = await KnowledgeInput.findById(winnerId);
+    const loser = await KnowledgeInput.findById(loserId);
+    if (winner) {
+      winner.status = 'approved';
+      winner.approvedById = req.user!._id;
+      winner.approvedAt = new Date();
+      await winner.save();
+    }
+    if (loser && loser.status !== 'rejected') {
+      loser.status = 'rejected';
+      await loser.save();
+    }
+
+    audit({
+      workspaceId: conflict.workspaceId.toString(),
+      projectId: conflict.projectId.toString(),
+      actorId: req.user!._id.toString(),
+      action: 'conflict.resolve',
+      entityType: 'conflict',
+      entityId: conflict._id.toString(),
+      before,
+      after: { status: 'resolved', via: 'one_click_recommendation', recommended: rec.recommended },
+      metadata: { approvedInput: winnerId, rejectedInput: loserId },
+      ipAddress: clientIp(req),
+    });
+
+    res.json({ ok: true, recommended: rec.recommended, reason: rec.reason, applied: [winnerId, loserId] });
   })
 );
 

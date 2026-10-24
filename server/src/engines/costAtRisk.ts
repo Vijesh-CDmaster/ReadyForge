@@ -3,6 +3,25 @@ import { IKnowledgeInput } from '../models/KnowledgeInput';
 import { IConflict } from '../models/Conflict';
 import { IAsset } from '../models/Asset';
 
+export interface WasteReceipt {
+  /** What waste looks like if the team renders right now. */
+  ifRenderNow: {
+    renderCost: number;
+    reworkProbability: number; // 0..1
+    expectedWaste: number;
+    reasons: string[];
+  };
+  /** What waste looks like once every fixable item is cleared (floor = non-fixable signals). */
+  afterFixes: {
+    reworkProbability: number;
+    expectedWaste: number;
+    verdict: 'safe' | 'still_risky';
+  };
+  /** Number of discrete items the user must fix, and what they are. */
+  fixableItems: string[];
+  disclaimer: string;
+}
+
 export interface CostAtRiskReport {
   plannedCost: number;
   reworkProbability: number; // 0..1
@@ -12,6 +31,7 @@ export interface CostAtRiskReport {
   recommendedActions: string[];
   nextStage: string;
   signals: Array<{ label: string; contribution: number }>;
+  receipt: WasteReceipt;
   disclaimer: string;
   source: 'ai' | 'rule_engine';
   generatedAt: Date;
@@ -89,6 +109,36 @@ export function computeCostAtRisk(opts: {
   const reworkProbability = Math.min(0.95, Math.round(signals.reduce((s, x) => s + x.contribution, 0.05) * 100) / 100);
   const estimatedLoss = Math.round(plannedCost * reworkProbability);
 
+  /* ---- Waste Receipt (Enhancement 1) ----
+     After-fixes projection: only NON-fixable signals remain (complexity + history),
+     plus the 5% floor. That is the best achievable state without more data. */
+  const fixableKeys = new Set(['unresolved_conflicts', 'missing_fields', 'unsupported_claims', 'rights_risks']);
+  const fixableItems: string[] = [];
+  openConflicts.forEach((c) => fixableItems.push(`Resolve conflict: ${c.title}`));
+  missingFields.forEach((f) => fixableItems.push(`Complete missing field: ${f}`));
+  unapprovedClaims.forEach((c) => fixableItems.push(`Approve or rewrite claim: ${c.title}`));
+  rightsRisks.forEach((a) => fixableItems.push(`Licence asset: ${a.name} (currently ${a.licenseStatus})`));
+
+  const floorProb = Math.min(
+    0.95,
+    Math.round((signals.filter((s) => !fixableKeys.has(s.label)).reduce((sum, s) => sum + s.contribution, 0.05)) * 100) / 100
+  );
+  const receipt: WasteReceipt = {
+    ifRenderNow: {
+      renderCost: plannedCost,
+      reworkProbability,
+      expectedWaste: estimatedLoss,
+      reasons,
+    },
+    afterFixes: {
+      reworkProbability: floorProb,
+      expectedWaste: Math.round(plannedCost * floorProb),
+      verdict: floorProb < 0.1 ? 'safe' : 'still_risky',
+    },
+    fixableItems,
+    disclaimer: 'Estimate, not a guarantee — derived from this project’s current risk signals.',
+  };
+
   if (reworkProbability < 0.1) {
     recommendedActions.length = 0;
     recommendedActions.push('Risk is low — generation is recommended.');
@@ -103,6 +153,7 @@ export function computeCostAtRisk(opts: {
     recommendedActions,
     nextStage: nextStageLabel(project),
     signals,
+    receipt,
     disclaimer: 'Estimate, not a guarantee. Derived from transparent risk signals in this project.',
     source: 'rule_engine',
     generatedAt: new Date(),

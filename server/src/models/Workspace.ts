@@ -20,6 +20,16 @@ export interface IWorkspaceMember {
   joinedAt?: Date;
 }
 
+export interface IBrandDna {
+  brandName: string;
+  tone: string;
+  bannedWords: string[];
+  colourPalette: string[];
+  logoRules: string;
+  targetAudience: string;
+  legalRestrictions: string[];
+}
+
 export interface IWorkspace {
   _id: Types.ObjectId;
   name: string;
@@ -27,6 +37,7 @@ export interface IWorkspace {
   ownerId: Types.ObjectId;
   members: IWorkspaceMember[];
   brandProfileId?: Types.ObjectId;
+  brandDna?: IBrandDna;
   settings: {
     defaultCurrency: string;
     aiProviders: string[];
@@ -50,6 +61,15 @@ const workspaceSchema = new Schema<IWorkspace>(
       },
     ],
     brandProfileId: { type: Schema.Types.ObjectId, ref: 'BrandProfile' },
+    brandDna: {
+      brandName: { type: String, maxlength: 200, default: '' },
+      tone: { type: String, maxlength: 400, default: '' },
+      bannedWords: { type: [String], default: [] },
+      colourPalette: { type: [String], default: [] },
+      logoRules: { type: String, maxlength: 1000, default: '' },
+      targetAudience: { type: String, maxlength: 1000, default: '' },
+      legalRestrictions: { type: [String], default: [] },
+    },
     settings: {
       defaultCurrency: { type: String, default: 'INR' },
       aiProviders: { type: [String], default: ['openai-compatible'] },

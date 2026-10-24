@@ -74,6 +74,7 @@ export default function ProjectLayout() {
     { to: `${base}/script`, label: 'Script' },
     { to: `${base}/storyboard`, label: 'Storyboard' },
     { to: `${base}/verification`, label: 'Verify' },
+    { to: `${base}/lab`, label: 'Campaign lab' },
     { to: `${base}/provenance`, label: 'Provenance' },
   ];
 

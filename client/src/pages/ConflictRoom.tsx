@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { GitMerge, ScanSearch } from 'lucide-react';
+import { GitMerge, ScanSearch, Sparkles, MessageSquare } from 'lucide-react';
 import { api } from '../lib/api';
 import {
   Badge,
@@ -15,6 +15,13 @@ import {
 import { ConflictCard, AiSourceBadge } from '../components/widgets';
 import { toast } from '../store/toast';
 import { useProject } from './ProjectLayout';
+
+interface Recommendation {
+  optionA: { id: string; content: string; creatorRole: string | null } | null;
+  optionB: { id: string; content: string; creatorRole: string | null } | null;
+  recommended: 'A' | 'B' | null;
+  reason: string;
+}
 
 interface ConflictRow {
   id: string;
@@ -103,6 +110,30 @@ export default function ConflictRoom() {
     onError: (err) => toast.error(err.message),
   });
 
+  // One-click recommendation for the conflict currently open in the modal.
+  const { data: recommendation } = useQuery({
+    queryKey: ['conflict-rec', resolving?.id],
+    queryFn: () => api.get<Recommendation>(`/api/conflicts/${resolving!.id}/recommendation`),
+    enabled: Boolean(resolving?.id),
+  });
+
+  const acceptRecommendation = useMutation({
+    mutationFn: () =>
+      api.patch<{ ok: boolean; recommended: 'A' | 'B'; reason: string }>(
+        `/api/conflicts/${resolving!.id}/accept-recommendation`
+      ),
+    onSuccess: (res) => {
+      toast.success(`Conflict resolved via recommendation (Option ${res.recommended})`);
+      setResolving(null);
+      setResolution('');
+      setInputAction({});
+      invalidate();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const [discussMode, setDiscussMode] = useState(false);
+
   if (!project) return <Loading />;
   if (isLoading) return <Loading label="Loading conflicts…" />;
   if (error) return <ErrorBox error={error} />;
@@ -150,6 +181,7 @@ export default function ConflictRoom() {
                 setResolving(c);
                 setResolution(c.recommendedAction ? '' : '');
                 setInputAction({});
+                setDiscussMode(false);
               }}
             />
           ))}
@@ -195,6 +227,45 @@ export default function ConflictRoom() {
         {resolving && (
           <>
             <p className="text-sm text-slate-600 dark:text-slate-400">{resolving.description}</p>
+
+            {/* One-click recommendation */}
+            {recommendation?.recommended && !discussMode && (
+              <div className="my-3 rounded-lg border border-brand-200 bg-brand-50/60 p-4 dark:border-brand-800 dark:bg-brand-500/10">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="h-4 w-4 text-brand-600 dark:text-brand-300" />
+                  <p className="text-xs font-semibold uppercase tracking-wider text-brand-700 dark:text-brand-300">
+                    Recommended: Option {recommendation.recommended}
+                  </p>
+                </div>
+                <div className="mt-2 rounded-lg bg-white/70 p-3 text-xs text-slate-700 dark:bg-slate-900/50 dark:text-slate-300">
+                  <p className="font-mono">{recommendation.recommended === 'A' ? recommendation.optionA?.content : recommendation.optionB?.content}</p>
+                </div>
+                <p className="mt-2 text-xs text-slate-600 dark:text-slate-400">{recommendation.reason}</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button size="sm" loading={acceptRecommendation.isPending} onClick={() => acceptRecommendation.mutate()}>
+                    Accept recommendation
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      const keep = recommendation.recommended === 'A' ? recommendation.optionB : recommendation.optionA;
+                      if (keep) {
+                        setInputAction({ [keep.id]: 'approve' });
+                        setResolution(`Keeping Option ${recommendation.recommended === 'A' ? 'B' : 'A'}: ${keep.content}`);
+                      }
+                      setDiscussMode(true);
+                    }}
+                  >
+                    Keep Option {recommendation.recommended === 'A' ? 'B' : 'A'}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setDiscussMode(true)}>
+                    <MessageSquare className="h-3.5 w-3.5" /> Discuss
+                  </Button>
+                </div>
+              </div>
+            )}
+
             <div className="my-3 grid gap-2 sm:grid-cols-2">
               {[resolving.inputA, resolving.inputB].filter(Boolean).map((input, i) => (
                 <div key={i} className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/60">
@@ -230,6 +301,11 @@ export default function ConflictRoom() {
             <p className="mt-2 text-xs text-slate-500">
               The decision, input changes and your identity are written to the audit trail.
             </p>
+            {discussMode && (
+              <Button size="sm" variant="ghost" className="mt-2" onClick={() => setDiscussMode(false)}>
+                ← Back to recommendation
+              </Button>
+            )}
           </>
         )}
       </Modal>

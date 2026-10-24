@@ -1,10 +1,11 @@
-import { Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
-import { Plus, FolderKanban, Users, AlertTriangle, ArrowRight } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Plus, FolderKanban, Users, AlertTriangle, ArrowRight, Flame } from 'lucide-react';
 import { api } from '../lib/api';
 import { useAuthStore } from '../store/auth';
 import { Button, Card, EmptyState, Loading, SectionTitle, Badge, ErrorBox } from '../components/ui';
 import { StatusBadge, ReadinessMeter } from '../components/widgets';
+import { toast } from '../store/toast';
 
 interface ProjectRow {
   id: string;
@@ -22,10 +23,29 @@ interface ProjectRow {
 
 export default function Dashboard() {
   const { user, workspaces } = useAuthStore();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   const { data: projects, isLoading, error } = useQuery({
     queryKey: ['projects'],
     queryFn: () => api.get<ProjectRow[]>('/api/projects'),
+  });
+
+  // Judge Mode: one click loads a deliberately risky campaign to demo the gates.
+  const judgeMode = useMutation({
+    mutationFn: () => {
+      const wsId = workspaces[0]?.id;
+      if (!wsId) throw new Error('Create a workspace first');
+      return api.post<{ projectId: string; conflictsCreated: number; risk: { score: number } }>(
+        `/api/workspaces/${wsId}/judge-mode`
+      );
+    },
+    onSuccess: (res) => {
+      toast.success(`Risky campaign loaded — ${res.conflictsCreated} conflict(s), risk score ${res.risk.score}`);
+      void queryClient.invalidateQueries({ queryKey: ['projects'] });
+      navigate(`/app/projects/${res.projectId}/risk`);
+    },
+    onError: (err: Error) => toast.error(err.message),
   });
 
   if (isLoading) return <Loading label="Loading dashboard…" />;
@@ -40,6 +60,15 @@ export default function Dashboard() {
         subtitle="Do not generate until the project is ready."
         action={
           <div className="flex gap-2">
+            <Button
+              variant="danger"
+              size="sm"
+              loading={judgeMode.isPending}
+              onClick={() => judgeMode.mutate()}
+              title="Loads a demo campaign with conflicting prices, an unsupported claim and an unlicensed track"
+            >
+              <Flame className="h-3.5 w-3.5" /> Simulate Risky Campaign
+            </Button>
             <Link to="/app/workspaces/new">
               <Button variant="outline" size="sm">
                 <Users className="h-3.5 w-3.5" /> New workspace

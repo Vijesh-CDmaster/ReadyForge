@@ -104,6 +104,27 @@ export default function DraftLadder() {
     refetchInterval: false,
   });
 
+  const { data: autopsy } = useQuery({
+    queryKey: ['autopsy', projectId],
+    queryFn: () =>
+      api.get<{
+        cases: Array<{
+          id: string;
+          stage: string;
+          decision: string;
+          reviewer: string;
+          comment: string;
+          rootCause: string;
+          whatWasGenerated: string;
+          whatChanged: string | null;
+          prevention: string;
+          createdAt: string;
+        }>;
+        summary: string;
+      }>(`/api/projects/${projectId}/autopsy`),
+    enabled: Boolean(projectId),
+  });
+
   const [reviewTask, setReviewTask] = useState<LadderTask | null>(null);
   const [comment, setComment] = useState('');
   const [regenStage, setRegenStage] = useState<StageState | null>(null);
@@ -408,6 +429,57 @@ export default function DraftLadder() {
           </Card>
         )}
       </div>
+
+      {/* regeneration autopsy */}
+      {autopsy && autopsy.cases.length > 0 && (
+        <div>
+          <SectionTitle
+            title="Regeneration Autopsy"
+            subtitle={autopsy.summary}
+          />
+          <div className="grid gap-4 lg:grid-cols-2">
+            {autopsy.cases.map((c) => (
+              <Card key={c.id} className="p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-semibold capitalize">Rejected: {c.stage}</p>
+                  <Badge tone="danger">{c.decision}</Badge>
+                </div>
+                <dl className="mt-3 space-y-2 text-xs">
+                  <div>
+                    <dt className="font-medium text-slate-500">What was generated</dt>
+                    <dd className="text-slate-700 dark:text-slate-300">{c.whatWasGenerated}</dd>
+                  </div>
+                  <div>
+                    <dt className="font-medium text-slate-500">Why it was rejected</dt>
+                    <dd className="text-slate-700 dark:text-slate-300">{c.comment || 'No comment recorded.'}</dd>
+                  </div>
+                  <div>
+                    <dt className="font-medium text-slate-500">Root cause</dt>
+                    <dd className="rounded-md bg-rose-50 px-2 py-1.5 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
+                      {c.rootCause}
+                    </dd>
+                  </div>
+                  {c.whatChanged && (
+                    <div>
+                      <dt className="font-medium text-slate-500">What changed</dt>
+                      <dd className="text-slate-700 dark:text-slate-300">{c.whatChanged}</dd>
+                    </div>
+                  )}
+                  <div>
+                    <dt className="font-medium text-slate-500">Prevention</dt>
+                    <dd className="rounded-md bg-emerald-50 px-2 py-1.5 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+                      {c.prevention}
+                    </dd>
+                  </div>
+                </dl>
+                <p className="mt-2 text-[11px] text-slate-400">
+                  Reviewed by {c.reviewer} · {new Date(c.createdAt).toLocaleString()}
+                </p>
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* output viewer */}
       <Modal open={Boolean(viewTask)} onClose={() => setViewTask(null)} title={viewTask ? `${viewTask.taskType} output · attempt ${viewTask.attempt}` : ''}>

@@ -24,6 +24,14 @@ export interface VerifyInput {
   approvedFacts: IKnowledgeInput[];
   script: string;
   scenes: IStoryboardScene[];
+  /** Workspace Brand DNA (banned words, tone, legal restrictions) when available. */
+  brandDna?: {
+    brandName?: string;
+    tone?: string;
+    bannedWords?: string[];
+    targetAudience?: string;
+    legalRestrictions?: string[];
+  } | null;
 }
 
 export interface VerifyOutcome {
@@ -239,6 +247,21 @@ export async function verifyOutput(input: VerifyInput): Promise<VerifyOutcome> {
     });
   }
 
+  /* ---- brand DNA guardrails: banned words + legal restrictions (deterministic) ---- */
+  const bannedHits = (input.brandDna?.bannedWords || []).filter((w) =>
+    w.trim() && script.toLowerCase().includes(w.trim().toLowerCase())
+  );
+  if (input.brandDna?.bannedWords?.length && bannedHits.length) {
+    checks.push({
+      checkType: 'brand_fit',
+      status: 'failed',
+      severity: 'high',
+      message: `${bannedHits.length} banned word(s) from the Brand DNA appear in the script`,
+      evidence: `Banned words found: ${bannedHits.map((w) => `“${w}”`).join(', ')}`,
+      suggestedFix: `Rewrite the flagged lines without ${bannedHits.map((w) => `“${w}”`).join(', ')}.`,
+    });
+  }
+
   /* ---- semantic checks: intent, brand, tone (LLM with rule fallback) ---- */
   const semantic = await aiJson<IVerificationCheck[]>({
     system: `You are ReadyForge's Output Verification Agent.
@@ -263,6 +286,8 @@ Never invent facts. If evidence is missing, mark the check "warning".`,
   });
   for (const c of Array.isArray(semantic.data) ? semantic.data : []) {
     if (c && c.checkType) {
+      // A banned-word brand_fit failure already covers brand compliance this run.
+      if (c.checkType === 'brand_fit' && bannedHits.length) continue;
       checks.push({
         checkType: c.checkType,
         status: (['passed', 'warning', 'failed'].includes(c.status) ? c.status : 'warning') as CheckStatus,

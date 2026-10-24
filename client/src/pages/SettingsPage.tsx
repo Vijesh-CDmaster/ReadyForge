@@ -16,12 +16,23 @@ import {
   Textarea,
 } from '../components/ui';
 
+interface BrandDna {
+  brandName: string;
+  tone: string;
+  bannedWords: string[];
+  colourPalette: string[];
+  logoRules: string;
+  targetAudience: string;
+  legalRestrictions: string[];
+}
+
 interface WorkspaceDetail {
   id: string;
   name: string;
   description: string;
   role: string | null;
   settings: { defaultCurrency: string; aiProviders: string[]; budgetApprovalThreshold: number };
+  brandDna: BrandDna | null;
 }
 
 interface AuditRow {
@@ -54,6 +65,16 @@ export default function SettingsPage() {
   });
 
   const [form, setForm] = useState({ name: '', description: '', currency: 'INR', threshold: '1000' });
+  const [dna, setDna] = useState<BrandDna>({
+    brandName: '',
+    tone: '',
+    bannedWords: [],
+    colourPalette: [],
+    logoRules: '',
+    targetAudience: '',
+    legalRestrictions: [],
+  });
+  const [dnaText, setDnaText] = useState({ bannedWords: '', colourPalette: '', legalRestrictions: '' });
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
@@ -63,6 +84,21 @@ export default function SettingsPage() {
         description: data.description || '',
         currency: data.settings?.defaultCurrency || 'INR',
         threshold: String(data.settings?.budgetApprovalThreshold ?? 1000),
+      });
+      const b = data.brandDna;
+      setDna({
+        brandName: b?.brandName || '',
+        tone: b?.tone || '',
+        bannedWords: b?.bannedWords || [],
+        colourPalette: b?.colourPalette || [],
+        logoRules: b?.logoRules || '',
+        targetAudience: b?.targetAudience || '',
+        legalRestrictions: b?.legalRestrictions || [],
+      });
+      setDnaText({
+        bannedWords: (b?.bannedWords || []).join(', '),
+        colourPalette: (b?.colourPalette || []).join(', '),
+        legalRestrictions: (b?.legalRestrictions || []).join('\n'),
       });
       setDirty(false);
     }
@@ -76,6 +112,15 @@ export default function SettingsPage() {
         settings: {
           defaultCurrency: form.currency,
           budgetApprovalThreshold: Number(form.threshold) || 0,
+        },
+        brandDna: {
+          brandName: dna.brandName,
+          tone: dna.tone,
+          bannedWords: dnaText.bannedWords.split(',').map((s) => s.trim()).filter(Boolean),
+          colourPalette: dnaText.colourPalette.split(',').map((s) => s.trim()).filter(Boolean),
+          logoRules: dna.logoRules,
+          targetAudience: dna.targetAudience,
+          legalRestrictions: dnaText.legalRestrictions.split('\n').map((s) => s.trim()).filter(Boolean),
         },
       }),
     onSuccess: () => {
@@ -167,6 +212,93 @@ export default function SettingsPage() {
           <span>{(data.settings?.aiProviders || []).join(', ') || 'none'}</span>
         </div>
       </Card>
+
+      <div>
+        <SectionTitle
+          title="Brand DNA Card"
+          subtitle="Every generated script, storyboard and variant is screened against this card — banned words block verification."
+        />
+        <Card className="grid gap-4 md:grid-cols-2">
+          <Field label="Brand name">
+            <Input
+              value={dna.brandName}
+              disabled={!isOwner}
+              onChange={(e) => {
+                setDna((d) => ({ ...d, brandName: e.target.value }));
+                setDirty(true);
+              }}
+            />
+          </Field>
+          <Field label="Tone" hint="Enforced as a verification check">
+            <Input
+              value={dna.tone}
+              disabled={!isOwner}
+              placeholder="e.g. premium, calm"
+              onChange={(e) => {
+                setDna((d) => ({ ...d, tone: e.target.value }));
+                setDirty(true);
+              }}
+            />
+          </Field>
+          <Field label="Banned words" hint="Comma-separated — blocks verification if found">
+            <Input
+              value={dnaText.bannedWords}
+              disabled={!isOwner}
+              placeholder="e.g. cheap, guaranteed, miracle"
+              onChange={(e) => {
+                setDnaText((t) => ({ ...t, bannedWords: e.target.value }));
+                setDirty(true);
+              }}
+            />
+          </Field>
+          <Field label="Colour palette" hint="Comma-separated hex codes or names">
+            <Input
+              value={dnaText.colourPalette}
+              disabled={!isOwner}
+              placeholder="e.g. #5B4BFF, warm off-white"
+              onChange={(e) => {
+                setDnaText((t) => ({ ...t, colourPalette: e.target.value }));
+                setDirty(true);
+              }}
+            />
+          </Field>
+          <Field label="Target audience">
+            <Input
+              value={dna.targetAudience}
+              disabled={!isOwner}
+              onChange={(e) => {
+                setDna((d) => ({ ...d, targetAudience: e.target.value }));
+                setDirty(true);
+              }}
+            />
+          </Field>
+          <Field label="Logo rules">
+            <Input
+              value={dna.logoRules}
+              disabled={!isOwner}
+              placeholder="e.g. clear space = logo height, never recolour"
+              onChange={(e) => {
+                setDna((d) => ({ ...d, logoRules: e.target.value }));
+                setDirty(true);
+              }}
+            />
+          </Field>
+          <div className="md:col-span-2">
+            <Field label="Legal restrictions" hint="One per line">
+              <Textarea
+                rows={2}
+                value={dnaText.legalRestrictions}
+                disabled={!isOwner}
+                placeholder="No guaranteed results claims"
+                onChange={(e) => {
+                  setDnaText((t) => ({ ...t, legalRestrictions: e.target.value }));
+                  setDirty(true);
+                }}
+              />
+            </Field>
+          </div>
+        </Card>
+      </div>
 
       <div>
         <SectionTitle title="Audit trail" subtitle="Last 100 sensitive actions in this workspace." />
