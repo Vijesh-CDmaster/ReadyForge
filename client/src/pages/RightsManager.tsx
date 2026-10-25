@@ -1,10 +1,31 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ShieldCheck, ShieldAlert, Scale } from 'lucide-react';
+import { ShieldCheck, ShieldAlert, Scale, BellRing } from 'lucide-react';
 import { api } from '../lib/api';
 import { Badge, Button, Card, ErrorBox, Field, Input, Loading, Select, cx } from '../components/ui';
 import { toast } from '../store/toast';
 import { useProject } from './ProjectLayout';
+
+interface RightsAlert {
+  id: string;
+  name: string;
+  type: string;
+  licenseStatus: string;
+  expiryDate: string | null;
+  daysLeft: number | null;
+  usedInCampaigns: number;
+  level: 'danger' | 'warning' | 'info';
+  message: string;
+  action: string;
+}
+
+interface SentinelPayload {
+  alerts: RightsAlert[];
+  expiringSoon: number;
+  scanned: number;
+  recommendation: string;
+  disclaimer: string;
+}
 
 interface AssetRow {
   id: string;
@@ -53,6 +74,12 @@ export default function RightsManager() {
     queryKey: ['assets', project?.id],
     queryFn: () => api.get<AssetRow[]>(`/api/projects/${project!.id}/assets`),
     enabled: Boolean(project?.id),
+  });
+
+  const { data: sentinel } = useQuery({
+    queryKey: ['rights-sentinel', project?.workspaceId],
+    queryFn: () => api.get<SentinelPayload>(`/api/workspaces/${project!.workspaceId}/rights-sentinel`),
+    enabled: Boolean(project?.workspaceId),
   });
 
   const invalidate = () => {
@@ -104,6 +131,31 @@ export default function RightsManager() {
           <em>unknown</em>, <em>restricted</em> or <em>expired</em> are blocked from final generation.
         </p>
       </Card>
+
+      {/* Rights Expiry Sentinel */}
+      {sentinel && sentinel.alerts.length > 0 && (
+        <Card className="border-rose-200 bg-rose-50/60 p-4 dark:border-rose-900 dark:bg-rose-950/30">
+          <div className="flex items-center gap-2">
+            <BellRing className="h-4 w-4 shrink-0 text-rose-600" />
+            <p className="text-sm font-semibold text-rose-800 dark:text-rose-200">
+              Rights Expiry Sentinel — {sentinel.alerts.length} alert(s) across {sentinel.scanned} assets
+            </p>
+          </div>
+          <p className="mt-1 text-xs text-rose-700 dark:text-rose-300">{sentinel.recommendation}</p>
+          <ul className="mt-2 space-y-1.5">
+            {sentinel.alerts.slice(0, 5).map((a) => (
+              <li key={a.id} className="flex flex-wrap items-center gap-2 text-xs text-rose-900 dark:text-rose-100">
+                <Badge tone={a.level === 'danger' ? 'danger' : 'warning'}>
+                  {a.daysLeft !== null ? (a.daysLeft < 0 ? 'expired' : `${a.daysLeft}d left`) : a.licenseStatus}
+                </Badge>
+                <span className="font-medium">{a.name}</span>
+                <span className="text-rose-700 dark:text-rose-300">{a.message} {a.action}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 text-[11px] italic text-rose-700/80 dark:text-rose-300/80">{sentinel.disclaimer}</p>
+        </Card>
+      )}
 
       {assets.length === 0 ? (
         <Card className="px-6 py-12 text-center text-sm text-slate-500">

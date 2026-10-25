@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Plus, Check, AlertTriangle, Trash2, ShieldCheck } from 'lucide-react';
+import { Plus, Check, AlertTriangle, Trash2, ShieldCheck, Clock } from 'lucide-react';
 import { api } from '../lib/api';
 import {
   Badge,
@@ -47,6 +47,26 @@ const STATUS_TONE: Record<string, 'success' | 'warning' | 'danger' | 'neutral'> 
   expired: 'warning',
 };
 
+interface DecayItem {
+  id: string;
+  title: string;
+  type: string;
+  reason: 'expired' | 'stale' | 'aging';
+  daysOld: number;
+  daysToExpiry: number | null;
+  usedInCampaigns: number;
+  action: string;
+}
+
+interface DecayPayload {
+  expired: DecayItem[];
+  aging: DecayItem[];
+  items: DecayItem[];
+  scanned: number;
+  recommendation: string;
+  disclaimer: string;
+}
+
 export default function KnowledgeLedger() {
   const { data: project } = useProject();
   const queryClient = useQueryClient();
@@ -59,6 +79,12 @@ export default function KnowledgeLedger() {
     queryKey: ['inputs', project?.id],
     queryFn: () => api.get<LedgerInput[]>(`/api/projects/${project!.id}/inputs`),
     enabled: Boolean(project?.id),
+  });
+
+  const { data: decay } = useQuery({
+    queryKey: ['knowledge-decay', project?.workspaceId],
+    queryFn: () => api.get<DecayPayload>(`/api/workspaces/${project!.workspaceId}/knowledge-decay`),
+    enabled: Boolean(project?.workspaceId),
   });
 
   const invalidate = () => {
@@ -149,6 +175,31 @@ export default function KnowledgeLedger() {
           </Button>
         </div>
       </div>
+
+      {/* Knowledge Decay Detector */}
+      {decay && decay.items.length > 0 && (
+        <Card className="border-amber-200 bg-amber-50/60 p-4 dark:border-amber-900 dark:bg-amber-950/30">
+          <div className="flex items-center gap-2">
+            <Clock className="h-4 w-4 shrink-0 text-amber-600" />
+            <p className="text-sm font-semibold text-amber-800 dark:text-amber-200">
+              Knowledge decay detected — {decay.items.length} of {decay.scanned} inputs need re-confirmation
+            </p>
+          </div>
+          <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">{decay.recommendation}</p>
+          <ul className="mt-2 space-y-1.5">
+            {decay.items.slice(0, 5).map((item) => (
+              <li key={item.id} className="flex flex-wrap items-center gap-2 text-xs text-amber-900 dark:text-amber-100">
+                <Badge tone={item.reason === 'expired' ? 'danger' : 'warning'}>{item.reason}</Badge>
+                <span className="font-medium">{item.title}</span>
+                <span className="text-amber-700 dark:text-amber-300">
+                  {item.reason === 'expired' ? item.action : `${item.daysOld} days old · used in ${item.usedInCampaigns} contract(s)`}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 text-[11px] italic text-amber-700/80 dark:text-amber-300/80">{decay.disclaimer}</p>
+        </Card>
+      )}
 
       {filtered.length === 0 ? (
         <Card className="px-6 py-12 text-center text-sm text-slate-500">

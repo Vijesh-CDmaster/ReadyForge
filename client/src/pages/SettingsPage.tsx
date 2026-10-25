@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Save, ShieldCheck } from 'lucide-react';
+import { Save, ShieldCheck, TrendingDown, Activity } from 'lucide-react';
 import { api } from '../lib/api';
 import { toast } from '../store/toast';
 import {
@@ -43,6 +43,15 @@ interface AuditRow {
   createdAt: string;
 }
 
+interface DriftPayload {
+  level: 'aligned' | 'watch' | 'drifting';
+  driftScore: number;
+  window: { outputs: number; since: string | null };
+  signals: Array<{ level: 'info' | 'warning' | 'danger'; message: string; evidence: string[] }>;
+  recommendation: string;
+  disclaimer: string;
+}
+
 /**
  * Workspace Settings — name, currency, budget-approval threshold, plus the
  * audit trail (spec §6 / §12: audit logging for sensitive actions).
@@ -61,6 +70,12 @@ export default function SettingsPage() {
   const { data: audit } = useQuery({
     queryKey: ['audit', workspaceId],
     queryFn: () => api.get<AuditRow[]>(`/api/workspaces/${workspaceId}/audit-logs`),
+    enabled: Boolean(workspaceId),
+  });
+
+  const { data: drift } = useQuery({
+    queryKey: ['brand-drift', workspaceId],
+    queryFn: () => api.get<DriftPayload>(`/api/workspaces/${workspaceId}/brand-drift`),
     enabled: Boolean(workspaceId),
   });
 
@@ -298,6 +313,43 @@ export default function SettingsPage() {
             </Field>
           </div>
         </Card>
+      </div>
+
+      <div>
+        <SectionTitle
+          title="Brand Drift Detector"
+          subtitle="Long-term brand consistency across recent generated outputs — not just one asset."
+          action={
+            drift ? (
+              <Badge tone={drift.level === 'aligned' ? 'success' : drift.level === 'watch' ? 'warning' : 'danger'}>
+                {drift.level === 'drifting' && <TrendingDown className="mr-1 inline h-3 w-3" />}
+                {drift.level === 'aligned' && <Activity className="mr-1 inline h-3 w-3" />}
+                {drift.level} · {drift.driftScore}/100
+              </Badge>
+            ) : null
+          }
+        />
+        {drift && (
+          <Card className="p-5">
+            <p className="text-sm text-slate-600 dark:text-slate-300">{drift.recommendation}</p>
+            <ul className="mt-3 space-y-2">
+              {drift.signals.map((s, i) => (
+                <li key={i} className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                  <div className="flex items-center gap-2 text-xs">
+                    <Badge tone={s.level === 'danger' ? 'danger' : s.level === 'warning' ? 'warning' : 'neutral'}>{s.level}</Badge>
+                    <span className="font-medium">{s.message}</span>
+                  </div>
+                  {s.evidence.length > 0 && (
+                    <p className="mt-1 text-[11px] text-slate-500">Evidence: {s.evidence.join(', ')}</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-3 text-[11px] italic text-slate-400">
+              Window: last {drift.window.outputs} output(s). {drift.disclaimer}
+            </p>
+          </Card>
+        )}
       </div>
 
       <div>
