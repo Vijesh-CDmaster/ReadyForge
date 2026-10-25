@@ -373,6 +373,24 @@ projectsRouter.get(
   })
 );
 
+/* Spec: project validation — can this project safely generate right now? */
+projectsRouter.get(
+  '/:id/validate',
+  requireProject(),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const project = req.project!;
+    const { inputs, conflicts, assets, contract } = await projectContext(project._id);
+    const report = computeReadiness({ project, inputs, conflicts, assets, contract });
+    res.json({
+      ...report,
+      valid: report.blockingIssues.length === 0,
+      openConflicts: conflicts.filter((c) => c.status === 'open' || c.status === 'awaiting_decision').length,
+      contractStatus: contract?.status ?? null,
+      validatedAt: new Date(),
+    });
+  })
+);
+
 projectsRouter.get(
   '/:id/cost-at-risk',
   requireProject(),
@@ -611,6 +629,37 @@ projectsRouter.post(
       entityId: contract._id.toString(),
       before: { status: 'pending_approval' },
       after: { status: 'rejected', comment: body.comment },
+      ipAddress: clientIp(req),
+    });
+
+    res.json({ contract });
+  })
+);
+
+/* Lock an approved contract so final generation runs against frozen terms (spec 10.16). */
+projectsRouter.post(
+  '/:id/contract/lock',
+  requireProject('owner', 'lead'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const project = req.project!;
+    const contract = await ProductionContract.findOne({ projectId: project._id, status: { $ne: 'superseded' } }).sort('-version');
+    if (!contract) throw new ApiError(404, 'No contract to lock');
+    if (contract.status !== 'approved') {
+      throw new ApiError(409, `Contract is ${contract.status} — only an approved contract can be locked`);
+    }
+
+    contract.status = 'locked';
+    await contract.save();
+
+    audit({
+      workspaceId: contract.workspaceId.toString(),
+      projectId: project._id.toString(),
+      actorId: req.user!._id.toString(),
+      action: 'contract.lock',
+      entityType: 'production_contract',
+      entityId: contract._id.toString(),
+      before: { status: 'approved' },
+      after: { status: 'locked' },
       ipAddress: clientIp(req),
     });
 

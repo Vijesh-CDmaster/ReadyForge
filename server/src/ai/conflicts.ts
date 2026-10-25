@@ -80,7 +80,7 @@ Do not invent facts. Only flag issues supported by the provided inputs. Return [
 /* ---------------- deterministic fallbacks ---------------- */
 
 const NEGATIONS: Array<[RegExp, RegExp, string, ConflictType]> = [
-  [/\b(everyone|all users|anyone|unlimited|free trial)\b/i, /\b(enterprise[- ]only|enterprise plans? only|paid only|no free)\b/i, 'Offer eligibility contradiction', 'pricing'],
+  [/\b(everyone|all users|anyone|unlimited|free trial)\b/i, /\b(enterprise[- ]only|enterprise plans? only|paid only|no free|only\s+(?:for\s+)?(?:enterprise|business|premium|vip)\b)/i, 'Offer eligibility contradiction', 'pricing'],
   [/\bfree\b/i, /\b(paid|premium|subscription required)\b/i, 'Free vs paid contradiction', 'pricing'],
   [/\b(monthly)\b/i, /\b(annual|yearly)\b/i, 'Billing cadence contradiction', 'pricing'],
   [/\b(individuals?|consumers?|smb)\b/i, /\b(enterprise|developers?|schools?)\b/i, 'Audience definition contradiction', 'audience'],
@@ -200,6 +200,12 @@ function comparableTypes(a: IKnowledgeInput, b: IKnowledgeInput): boolean {
 function conflictTypeForInputs(a: IKnowledgeInput, b: IKnowledgeInput): ConflictType {
   const types = new Set([a.type, b.type]);
   if (types.has('price')) return 'pricing';
+  // Offer/eligibility contradictions (e.g. “free trial for all” vs “enterprise
+  // only”) are pricing decisions even when both inputs are constraints/goals.
+  const text = `${a.title} ${a.content} ${b.title} ${b.content}`.toLowerCase();
+  if (/\b(trial|offer|discount|coupon|eligib|pricing|price|billing|refund|payment)\b/.test(text)) {
+    return 'pricing';
+  }
   if (types.has('claim') || types.has('fact')) return 'factual';
   if (types.has('audience')) return 'audience';
   if (types.has('tone')) return 'tone';

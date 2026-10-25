@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Users, Wand2, CheckCircle2, XCircle, Sparkles, Gauge, FlaskConical, ArrowRight } from 'lucide-react';
+import { Users, Wand2, CheckCircle2, XCircle, Sparkles, Gauge, FlaskConical, ArrowRight, Palette } from 'lucide-react';
 import { api } from '../lib/api';
 import {
   Badge,
@@ -45,6 +46,67 @@ interface Variant {
 }
 
 const RISK_TONE = { low: 'success', medium: 'warning', high: 'danger' } as const;
+
+/* ---------- Creative Taste DNA: taste-based variant briefs (#19) ---------- */
+
+interface TasteBrief {
+  name: string;
+  adherence: string;
+  direction: string;
+  hookStyle: string;
+  pacing: string;
+  music: string;
+  storyShape: string;
+}
+
+function TasteBriefsSection({ projectId }: { projectId: string }) {
+  const [briefs, setBriefs] = useState<TasteBrief[] | null>(null);
+  const gen = useMutation({
+    mutationFn: () => api.post<{ variants: TasteBrief[] }>(`/api/taste/variants/${projectId}`, {}),
+    onSuccess: (r) => setBriefs(r.variants),
+    onError: (err) => toast.error(err.message),
+  });
+
+  return (
+    <div>
+      <SectionTitle
+        title="Taste-based direction briefs"
+        subtitle="Three creative directions from your Creative Taste DNA: your taste, the opposite pole, and a mix — to break creative fatigue."
+        action={
+          <Button variant="outline" loading={gen.isPending} onClick={() => gen.mutate()}>
+            <Palette className="h-4 w-4" /> Generate taste briefs
+          </Button>
+        }
+      />
+      {gen.error && <ErrorBox error={gen.error} className="mb-3" />}
+      {!briefs ? (
+        <EmptyState
+          icon={<Palette className="h-8 w-8" />}
+          title="No taste briefs yet"
+          description="Uses your Creative Taste DNA (taste slider + exploration mode) — never invents facts, so the approved contract still governs every claim."
+        />
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-3">
+          {briefs.map((b) => (
+            <Card key={b.name} className="p-5">
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-semibold">{b.name}</h3>
+                <Badge tone={b.adherence === 'high' ? 'brand' : 'neutral'}>{b.adherence} adherence</Badge>
+              </div>
+              <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">{b.direction}</p>
+              <dl className="mt-3 space-y-1 text-xs text-slate-500">
+                <div><dt className="inline font-medium">Hook: </dt><dd className="inline">{b.hookStyle}</dd></div>
+                <div><dt className="inline font-medium">Pacing: </dt><dd className="inline">{b.pacing}</dd></div>
+                <div><dt className="inline font-medium">Music: </dt><dd className="inline">{b.music}</dd></div>
+                <div><dt className="inline font-medium">Story: </dt><dd className="inline">{b.storyShape}</dd></div>
+              </dl>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /* ---------- Roadmap 31: Pre-Flight Performance Forecast ---------- */
 
@@ -438,6 +500,9 @@ export default function CampaignLabPage() {
           Variants inherit approved contract facts only — review before publishing. AI-generated content is disclosed in the Provenance Passport.
         </p>
       </div>
+
+      {/* ---------- Creative Taste DNA briefs ---------- */}
+      <TasteBriefsSection projectId={project.id} />
 
       {/* ---------- Experiment Planner ---------- */}
       <ExperimentSection projectId={project.id} />

@@ -9,6 +9,7 @@ import { KnowledgeInput } from './models/KnowledgeInput';
 import { Conflict } from './models/Conflict';
 import { Asset } from './models/Asset';
 import { Notification } from './models/Notification';
+import { ensureDemoPipeline, topUpDemoPipeline } from './demoPipeline';
 import { config } from './config';
 
 const UPLOADS = path.resolve(config.upload.dir);
@@ -66,6 +67,8 @@ function writeSilentWav(): string {
 export async function seed(): Promise<void> {
   const existing = await User.findOne({ email: 'demo@readyforge.ai' });
   if (existing) {
+    // Older demo databases may lack the contract/generation stage — backfill it.
+    await topUpDemoPipeline();
     console.log('[seed] demo data already present — skipping');
     return;
   }
@@ -190,7 +193,7 @@ export async function seed(): Promise<void> {
   const productUrl = writeProductImage();
   const musicUrl = writeSilentWav();
 
-  await Asset.create([
+  const assets = await Asset.create([
     {
       workspaceId: workspace._id,
       projectId: teamProject._id,
@@ -236,6 +239,22 @@ export async function seed(): Promise<void> {
       consentStatus: 'not_required',
     },
   ]);
+
+  /* ---------------- contract, generation history, verification, reviews ---------------- */
+  await ensureDemoPipeline({
+    workspaceId: workspace._id,
+    projectId: teamProject._id,
+    objective: teamProject.objective ?? '',
+    audience: teamProject.audience ?? '',
+    tone: teamProject.tone ?? '',
+    demoId: demo._id,
+    leadId: lead._id,
+    approvedInputIds: created.filter((i) => i.status === 'approved').map((i) => i._id),
+    claimInputId: created.find((i) => i.title === 'Supported claim')!._id,
+    audienceInputId: created.find((i) => i.title === 'Primary audience')!._id,
+    // Only licensed/owned assets enter the contract — the unknown-licence track is excluded on purpose.
+    clearedAssetIds: [assets[0]._id, assets[1]._id],
+  });
 
   /* ---------------- solo project ---------------- */
   const soloProject = await Project.create({

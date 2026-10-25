@@ -40,6 +40,18 @@ export default function AssetsLibrary() {
     enabled: Boolean(project?.id),
   });
 
+  // Taste-based asset recommendations (#27): matches uploads against Visual/Motion DNA.
+  const { data: tasteRecs } = useQuery({
+    queryKey: ['taste', 'recommendations', project?.id],
+    queryFn: () =>
+      api.get<{
+        recommendations: Array<{ id: string; name: string; score: number; matchedOn: string[]; licenseStatus: string }>;
+        note: string;
+      }>(`/api/taste/recommendations/${project!.id}`),
+    enabled: Boolean(project?.id),
+    retry: false,
+  });
+
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ['assets', project?.id] });
     void queryClient.invalidateQueries({ queryKey: ['readiness', project?.id] });
@@ -74,9 +86,32 @@ export default function AssetsLibrary() {
   if (error) return <ErrorBox error={error} />;
 
   const assets = data || [];
+  const tasteMatches = tasteRecs?.recommendations.slice(0, 3) ?? [];
 
   return (
     <div className="space-y-4">
+      {tasteMatches.length > 0 && (
+        <Card className="border-brand-200 bg-brand-50/40 p-4 dark:border-brand-500/25 dark:bg-brand-500/5">
+          <p className="text-xs font-semibold uppercase tracking-wider text-brand-700 dark:text-brand-300">
+            Taste-matched for this project
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {tasteMatches.map((a) => (
+              <span
+                key={a.id}
+                className="inline-flex items-center gap-2 rounded-lg border border-brand-200 bg-white px-3 py-1.5 text-xs dark:border-brand-500/30 dark:bg-slate-900"
+                title={`Matched on: ${a.matchedOn.join(', ')}`}
+              >
+                {a.name}
+                <Badge tone={LICENSE_TONE[a.licenseStatus] || 'neutral'}>{a.licenseStatus}</Badge>
+                <span className="font-semibold tabular-nums text-slate-500">{a.score}%</span>
+              </span>
+            ))}
+          </div>
+          <p className="mt-1.5 text-[11px] text-slate-500">{tasteRecs?.note}</p>
+        </Card>
+      )}
+
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <h2 className="text-base font-semibold">Assets Library</h2>

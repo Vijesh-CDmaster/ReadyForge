@@ -5,6 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="ReadyForge — the AI Production-Readiness Operating System. Do not generate until the project is ready." />
     <title>ReadyForge — AI Production-Readiness OS</title>
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      // Apply the theme before first paint to prevent a light/dark flash.
+      // Honors system preference until the user makes an explicit choice (rf_theme).
+      (function () {
+        try {
+          var stored = localStorage.getItem('rf_theme');
+          var dark = stored ? stored === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+          if (dark) document.documentElement.classList.add('dark');
+        } catch (e) {
+          /* storage blocked — keep light theme */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

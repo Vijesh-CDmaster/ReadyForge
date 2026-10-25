@@ -145,23 +145,58 @@ function contractFallback(
   };
 }
 
+/**
+ * Coerce an AI-returned value to a string. Small models occasionally return an
+ * object (e.g. {type:"webinar", url:...}) where a string is expected; without
+ * this, mongoose cast validation failed and contract creation returned a 500.
+ */
+function asString(v: unknown, fallback = ''): string {
+  if (typeof v === 'string') return v;
+  if (v == null) return fallback;
+  if (typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    const pick = [o.text, o.value, o.label, o.title].find((x) => typeof x === 'string');
+    if (pick) return pick as string;
+    if (typeof o.url === 'string') return o.type ? `${String(o.type)}: ${o.url}` : o.url;
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return fallback;
+    }
+  }
+  return String(v);
+}
+
+function asStringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.map((x) => asString(x)).filter(Boolean);
+}
+
 function sanitize(draft: ContractDraft, project: IProject): ContractDraft {
   const d = draft && typeof draft === 'object' ? draft : ({} as ContractDraft);
   return {
-    objective: d.objective || project.objective || '',
-    audience: d.audience || project.audience || '',
-    tone: d.tone || project.tone || '',
-    keyMessage: d.keyMessage || '',
-    callToAction: d.callToAction || project.callToAction || '',
-    brandRules: Array.isArray(d.brandRules) ? d.brandRules : [],
-    accessibilityRequirements: Array.isArray(d.accessibilityRequirements) ? d.accessibilityRequirements : [],
-    localisationRequirements: Array.isArray(d.localisationRequirements) ? d.localisationRequirements : [],
+    objective: asString(d.objective) || project.objective || '',
+    audience: asString(d.audience) || project.audience || '',
+    tone: asString(d.tone) || project.tone || '',
+    keyMessage: asString(d.keyMessage),
+    callToAction: asString(d.callToAction) || project.callToAction || '',
+    brandRules: asStringArray(d.brandRules),
+    accessibilityRequirements: asStringArray(d.accessibilityRequirements),
+    localisationRequirements: asStringArray(d.localisationRequirements),
     contentPlan: {
-      outline: Array.isArray(d.contentPlan?.outline) ? d.contentPlan.outline : [],
-      script: d.contentPlan?.script || '',
+      outline: asStringArray(d.contentPlan?.outline),
+      script: asString(d.contentPlan?.script),
     },
-    modelRoutingPlan: Array.isArray(d.modelRoutingPlan) ? d.modelRoutingPlan : [],
-    blockers: Array.isArray(d.blockers) ? d.blockers : [],
+    modelRoutingPlan: Array.isArray(d.modelRoutingPlan)
+      ? d.modelRoutingPlan.map((r) => ({
+          task: asString(r?.task),
+          preferredModel: asString(r?.preferredModel),
+          fallbackModel: asString(r?.fallbackModel),
+          estimatedCost: Number(r?.estimatedCost) || 0,
+          reason: asString(r?.reason),
+        }))
+      : [],
+    blockers: asStringArray(d.blockers),
   };
 }
 

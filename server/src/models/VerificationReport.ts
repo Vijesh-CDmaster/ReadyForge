@@ -34,6 +34,13 @@ export interface IVerificationReport {
   overallScore: number;
   summary: string;
   checks: IVerificationCheck[];
+  /** Human override of a non-passing report (spec 13.11/13.12). */
+  override?: {
+    reason: string;
+    byName?: string;
+    byId: Types.ObjectId;
+    at: Date;
+  };
   createdAt: Date;
   updatedAt: Date;
 }
@@ -46,6 +53,12 @@ const verificationReportSchema = new Schema<IVerificationReport>(
     status: { type: String, enum: CHECK_STATUSES, default: 'warning', index: true },
     overallScore: { type: Number, default: 0, min: 0, max: 100 },
     summary: { type: String, default: '' },
+    override: {
+      reason: { type: String },
+      byName: { type: String },
+      byId: { type: Schema.Types.ObjectId, ref: 'User' },
+      at: { type: Date },
+    },
     checks: [
       {
         checkType: { type: String, enum: CHECK_TYPES, required: true },

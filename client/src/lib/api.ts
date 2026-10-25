@@ -40,12 +40,27 @@ async function request<T>(path: string, opts: { method?: Method; body?: unknown;
   if (token) headers.Authorization = `Bearer ${token}`;
   if (opts.body !== undefined && !isForm) headers['Content-Type'] = 'application/json';
 
-  const res = await fetch(path, {
-    method,
-    headers,
-    credentials: 'include',
-    body: opts.body === undefined ? undefined : isForm ? (opts.body as FormData) : JSON.stringify(opts.body),
-  });
+  // Guard against hung requests leaving the UI in an eternal loading state.
+  // Uploads are exempt — large files on slow links may legitimately take longer.
+  const timeout = !isForm && typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal
+    ? AbortSignal.timeout(30_000)
+    : undefined;
+
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method,
+      headers,
+      credentials: 'include',
+      signal: timeout,
+      body: opts.body === undefined ? undefined : isForm ? (opts.body as FormData) : JSON.stringify(opts.body),
+    });
+  } catch (err) {
+    if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      throw new Error('Request timed out — the server took too long to respond. Please try again.', { cause: err });
+    }
+    throw err;
+  }
 
   if (res.status === 401 && opts.retry !== false) {
     const refreshed = await tryRefresh();
@@ -73,6 +88,7 @@ async function request<T>(path: string, opts: { method?: Method; body?: unknown;
 export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) => request<T>(path, { method: 'POST', body }),
+  put: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PUT', body }),
   patch: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PATCH', body }),
   del: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
 };

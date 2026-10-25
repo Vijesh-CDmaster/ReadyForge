@@ -105,7 +105,7 @@ export function computeReadiness(opts: {
   const approvedClaims = claims.filter((i) => i.status === 'approved');
   const unsupportedClaims = claims.filter((i) => i.status !== 'approved' && i.status !== 'rejected');
   const facts = inputs.filter((i) => i.type === 'fact' && i.status === 'approved');
-  let factualScore = 20;
+  let factualScore: number;
   if (claims.length === 0) {
     factualScore = facts.length ? 14 : 6;
     if (!facts.length) {

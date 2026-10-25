@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, FolderKanban, Users, AlertTriangle, ArrowRight, Flame } from 'lucide-react';
 import { api } from '../lib/api';
 import { useAuthStore } from '../store/auth';
-import { Button, Card, EmptyState, Loading, SectionTitle, Badge, ErrorBox } from '../components/ui';
+import { Button, Card, EmptyState, SkeletonCard, SectionTitle, Badge, ErrorBox } from '../components/ui';
 import { StatusBadge, ReadinessMeter } from '../components/widgets';
 import { toast } from '../store/toast';
 
@@ -48,7 +48,20 @@ export default function Dashboard() {
     onError: (err: Error) => toast.error(err.message),
   });
 
-  if (isLoading) return <Loading label="Loading dashboard…" />;
+  if (isLoading)
+    return (
+      <div className="mx-auto max-w-6xl" aria-busy="true" aria-label="Loading dashboard">
+        <div className="mb-6 grid gap-4 sm:grid-cols-3">
+          <SkeletonCard lines={1} />
+          <SkeletonCard lines={1} />
+          <SkeletonCard lines={1} />
+        </div>
+        <div className="grid gap-4 lg:grid-cols-2">
+          <SkeletonCard />
+          <SkeletonCard />
+        </div>
+      </div>
+    );
 
   const blocked = (projects || []).filter((p) => p.status === 'blocked' || p.readinessScore < 50);
   const ready = (projects || []).filter((p) => p.status === 'ready' || p.readinessScore >= 75);
@@ -85,13 +98,40 @@ export default function Dashboard() {
 
       {error && <ErrorBox error={error} className="mb-4" />}
 
-      {/* KPI strip */}
-      <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Kpi label="Workspaces" value={workspaces.length} icon={<Users className="h-4 w-4" />} />
+      {/* KPI strip — only metrics backed by real project data */}
+      <div className="mb-6 grid gap-4 sm:grid-cols-3">
         <Kpi label="Projects" value={projects?.length ?? 0} icon={<FolderKanban className="h-4 w-4" />} />
         <Kpi label="Ready to generate" value={ready.length} icon={<ArrowRight className="h-4 w-4" />} tone="success" />
         <Kpi label="Needs attention" value={blocked.length} icon={<AlertTriangle className="h-4 w-4" />} tone="danger" />
       </div>
+
+      {/* What is preventing production? → direct path to each project's blockers */}
+      {blocked.length > 0 && (
+        <Card className="mb-6 border-rose-200 p-4 dark:border-rose-900/60">
+          <div className="mb-2 flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-rose-500" aria-hidden />
+            <h2 className="text-sm font-semibold">Blocking production</h2>
+            <Badge tone="danger">{blocked.length} project{blocked.length === 1 ? '' : 's'}</Badge>
+          </div>
+          <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+            {blocked.map((p) => (
+              <li key={p.id} className="flex items-center justify-between gap-3 py-2">
+                <div className="min-w-0">
+                  <Link to={`/app/projects/${p.id}`} className="block truncate text-sm font-medium hover:text-brand-600 dark:hover:text-brand-300">
+                    {p.title}
+                  </Link>
+                  <p className="truncate text-xs text-slate-500">
+                    {p.status === 'blocked' ? 'Status: blocked' : `Readiness ${Math.round(p.readinessScore)}/100`} · stage {p.currentStage}
+                  </p>
+                </div>
+                <Link to={`/app/projects/${p.id}/readiness`} className="shrink-0">
+                  <Button variant="outline" size="sm">Review blockers</Button>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
 
       {/* Workspaces */}
       <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -148,6 +188,10 @@ export default function Dashboard() {
                     {p.budget.currency} {p.budget.remaining.toLocaleString('en-IN')} left
                   </span>
                 </div>
+                <div className="mt-2 flex items-center justify-between text-[11px] text-slate-400">
+                  <span>Stage: {p.currentStage}</span>
+                  <span>Updated {timeAgo(p.updatedAt)}</span>
+                </div>
               </Card>
             </Link>
           ))}
@@ -155,6 +199,19 @@ export default function Dashboard() {
       )}
     </div>
   );
+}
+
+function timeAgo(iso: string): string {
+  const then = new Date(iso).getTime();
+  const secs = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (secs < 60) return 'just now';
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString();
 }
 
 function Kpi({

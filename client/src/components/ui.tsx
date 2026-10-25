@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { X } from 'lucide-react';
 
 export const cx = (...parts: Array<string | false | null | undefined>) => parts.filter(Boolean).join(' ');
 
@@ -208,27 +209,221 @@ export function Modal(props: {
   footer?: React.ReactNode;
   wide?: boolean;
 }) {
-  React.useEffect(() => {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
     if (!props.open) return;
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && props.onClose();
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    // Remember the invoking element and move focus into the dialog.
+    previouslyFocused.current = document.activeElement as HTMLElement | null;
+    const dialog = dialogRef.current;
+    const focusables = dialog?.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    (focusables?.[0] || dialog)?.focus();
+
+    // Lock background scroll while the dialog is open (restore prior value).
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        props.onClose();
+        return;
+      }
+      // Keep Tab focus inside the dialog while it is open.
+      if (e.key !== 'Tab' || !dialog) return;
+      const items = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        )
+      ).filter((el) => !el.hasAttribute('disabled'));
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', onKey, true);
+    return () => {
+      document.removeEventListener('keydown', onKey, true);
+      document.body.style.overflow = prevOverflow;
+      previouslyFocused.current?.focus?.();
+    };
   }, [props.open]);
 
   if (!props.open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/50 p-4 backdrop-blur-sm sm:p-8" role="dialog" aria-modal="true">
-      <div className={cx('card w-full animate-fade-in', props.wide ? 'max-w-3xl' : 'max-w-lg')}>
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/50 p-4 backdrop-blur-sm sm:p-8"
+      role="presentation"
+      onMouseDown={(e) => {
+        // Click on the backdrop itself dismisses; clicks inside do not.
+        if (e.target === e.currentTarget) props.onClose();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        tabIndex={-1}
+        className={cx('card animate-scale-in outline-none', props.wide ? 'max-w-3xl' : 'max-w-lg')}
+        role="dialog"
+        aria-modal="true"
+        aria-label={props.title}
+      >
         <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4 dark:border-slate-800">
           <h3 className="text-sm font-semibold">{props.title}</h3>
-          <button onClick={props.onClose} className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800" aria-label="Close">
-            ✕
+          <button
+            onClick={props.onClose}
+            className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
+            aria-label="Close dialog"
+          >
+            <X className="h-4 w-4" aria-hidden />
           </button>
         </div>
         <div className="max-h-[70vh] overflow-y-auto px-5 py-4">{props.children}</div>
         {props.footer && (
           <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3 dark:border-slate-800">{props.footer}</div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Confirm dialog ---------------- */
+export function ConfirmDialog(props: {
+  open: boolean;
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  danger?: boolean;
+  loading?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <Modal
+      open={props.open}
+      onClose={props.onCancel}
+      title={props.title}
+      footer={
+        <>
+          <Button variant="outline" size="sm" onClick={props.onCancel} disabled={props.loading}>
+            Cancel
+          </Button>
+          <Button
+            variant={props.danger ? 'danger' : 'primary'}
+            size="sm"
+            loading={props.loading}
+            onClick={props.onConfirm}
+          >
+            {props.confirmLabel || 'Confirm'}
+          </Button>
+        </>
+      }
+    >
+      <p className="text-sm text-slate-600 dark:text-slate-300">{props.message}</p>
+    </Modal>
+  );
+}
+
+/* ---------------- Dropdown menu ---------------- */
+export function Dropdown(props: {
+  /** Accessible name for the trigger button, e.g. "Switch workspace". */
+  label: string;
+  /** Trigger contents. */
+  children: React.ReactNode;
+  /** Menu contents; call the argument to close the menu after an action. */
+  render: (close: () => void) => React.ReactNode;
+  align?: 'left' | 'right';
+  triggerClassName?: string;
+  panelClassName?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const wasOpen = useRef(false);
+  const skipRestoreFocus = useRef(false);
+
+  useEffect(() => {
+    if (!open) {
+      // Return focus to the trigger when the menu closes via its own controls
+      // (Escape or a chosen item), but never after an outside click — there the
+      // user's intent is somewhere else on the page.
+      if (wasOpen.current && !skipRestoreFocus.current) triggerRef.current?.focus();
+      wasOpen.current = false;
+      skipRestoreFocus.current = false;
+      return;
+    }
+    wasOpen.current = true;
+    const onPointerDown = (e: PointerEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        skipRestoreFocus.current = true;
+        setOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  // Deliberately ref-free: this closer is handed to the render prop during
+  // render, so it must only touch stable state setters (react-hooks/refs).
+  const close = () => setOpen(false);
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <button
+        ref={triggerRef}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        className={props.triggerClassName}
+      >
+        {props.children}
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label={props.label}
+          className={cx(
+            'absolute top-full z-30 mt-1 min-w-56 animate-fade-in rounded-lg border border-slate-200 bg-white p-1 shadow-lg dark:border-slate-700 dark:bg-slate-900',
+            props.align === 'right' ? 'right-0' : 'left-0',
+            props.panelClassName
+          )}
+        >
+          {props.render(close)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Skeleton loaders ---------------- */
+export function Skeleton({ className = 'h-4' }: { className?: string }) {
+  return <div className={cx('animate-pulse rounded-md bg-slate-200 dark:bg-slate-800', className)} aria-hidden />;
+}
+
+export function SkeletonCard({ lines = 3 }: { lines?: number }) {
+  return (
+    <div className="card p-4" aria-hidden>
+      <Skeleton className="h-4 w-1/3" />
+      <div className="mt-3 space-y-2">
+        {Array.from({ length: lines }).map((_, i) => (
+          <Skeleton key={i} className="h-3 w-full" />
+        ))}
       </div>
     </div>
   );

@@ -26,6 +26,8 @@ import {
   generateStoryboard,
 } from '../ai/generation';
 import { verifyOutput } from '../ai/verify';
+import { loadTasteDirection } from '../ai/taste';
+import { TasteProfile } from '../models/TasteProfile';
 
 export const generationRouter = Router();
 generationRouter.use(requireAuth);
@@ -96,7 +98,7 @@ function computeLadder(opts: {
   const globalBlockers = readiness.blockingIssues.map((b) => b.message);
 
   if (!contract) globalBlockers.unshift('No Production Contract yet — create and approve one first.');
-  else if (contract.status !== 'approved') {
+  else if (contract.status !== 'approved' && contract.status !== 'locked') {
     globalBlockers.unshift(`Contract v${contract.version} is ${contract.status} — generation requires an approved contract.`);
   }
 
@@ -275,6 +277,8 @@ generationRouter.post(
     });
 
     const started = Date.now();
+    // Creative Taste DNA shapes expression; the approved contract always wins conflicts.
+    const tasteDirection = (await loadTasteDirection(user._id, project._id)) ?? undefined;
     try {
       let outputText = '';
       let source: 'ai' | 'rule_engine' = 'rule_engine';
@@ -287,13 +291,13 @@ generationRouter.post(
         source = r.source;
         model = r.model;
       } else if (body.stage === 'script') {
-        const r = await generateScript(project, contract);
+        const r = await generateScript(project, contract, tasteDirection);
         contract.contentPlan.script = r.data.script;
         outputText = r.data.script;
         source = r.source;
         model = r.model;
       } else if (body.stage === 'storyboard') {
-        const r = await generateStoryboard(project, contract, contract.contentPlan.script);
+        const r = await generateStoryboard(project, contract, contract.contentPlan.script, tasteDirection);
         const scenes: IStoryboardScene[] = r.data.scenes.map((s) => ({
           sceneNumber: s.sceneNumber,
           title: s.title,
@@ -440,6 +444,17 @@ generationRouter.post(
       throw new ApiError(409, `Task is ${task.status} — only completed output can be reviewed`);
     }
 
+    // Spec 13.10 — a failed verification blocks approval until a documented human override exists.
+    if (body.decision === 'approved') {
+      const latest = await VerificationReport.findOne({ projectId: project._id }).sort('-createdAt');
+      if (latest?.status === 'failed' && !latest.override?.at) {
+        throw new ApiError(
+          409,
+          'Verification failed — fix the reported issues, or record a documented override, before approving this output.'
+        );
+      }
+    }
+
     task.reviewStatus = body.decision;
     task.reviewedById = user._id;
     task.reviewedAt = new Date();
@@ -461,6 +476,34 @@ generationRouter.post(
       comment: body.comment || '',
       rootCause,
     });
+
+    // Taste learning (#16): every decision teaches the reviewer's Creative Taste DNA.
+    // They only learn here — not silently — so the change is visible in Taste history.
+    try {
+      const taste = await TasteProfile.findOneAndUpdate(
+        { userId: user._id, projectId: { $exists: false } },
+        body.decision === 'approved' ? { $inc: { 'stats.acceptedOutputs': 1 } } : { $inc: { 'stats.rejections': 1 } },
+        { new: true }
+      );
+      if (taste) {
+        taste.history.unshift({
+          at: new Date(),
+          summary:
+            body.decision === 'approved'
+              ? `Approved ${STAGE_LABEL[task.stage || task.taskType]} output — accepted-output evidence`
+              : `Rejected ${STAGE_LABEL[task.stage || task.taskType]} output — taste evidence updated`,
+          source: 'learned',
+          scope: 'user',
+          remember: true,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        } as never);
+        if (taste.history.length > 100) taste.history.length = 100;
+        await taste.save();
+      }
+    } catch (err) {
+      console.warn('[taste] learn failed:', (err as Error).message);
+    }
 
     if (task.stage) {
       const contract = await ProductionContract.findOne({ projectId: project._id, status: { $ne: 'superseded' } }).sort('-version');
@@ -610,6 +653,85 @@ generationRouter.get(
   })
 );
 
+/* Human override of a failed/warning report (spec 13.11–13.12: explainable, disputable, auditable). */
+const overrideSchema = z.object({ reason: z.string().min(10, 'Give a reason an auditor can read').max(2000) });
+
+generationRouter.post(
+  '/projects/:id/verification/:reportId/override',
+  requireProject('owner', 'lead', 'reviewer', 'legal_reviewer'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const body = validateBody(overrideSchema, req.body);
+    const project = req.project!;
+    const report = await VerificationReport.findOne({ _id: req.params.reportId, projectId: project._id });
+    if (!report) throw new ApiError(404, 'Verification report not found');
+    if (report.status === 'passed') throw new ApiError(409, 'This report already passed — no override needed');
+    if (report.override?.at) throw new ApiError(409, 'This report already carries an override');
+
+    report.override = {
+      reason: body.reason,
+      byName: req.user!.name,
+      byId: req.user!._id,
+      at: new Date(),
+    };
+    await report.save();
+
+    audit({
+      workspaceId: project.workspaceId.toString(),
+      projectId: project._id.toString(),
+      actorId: req.user!._id.toString(),
+      action: 'verification.override',
+      entityType: 'verification_report',
+      entityId: report._id.toString(),
+      before: { status: report.status, override: null },
+      after: { status: report.status, reason: body.reason },
+      ipAddress: clientIp(req),
+    });
+
+    res.json({ report });
+  })
+);
+
+/* Canonical spec 13.11 path: POST /verification-reports/:id/override */
+generationRouter.post(
+  '/verification-reports/:id/override',
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const body = validateBody(overrideSchema, req.body);
+    const report = await VerificationReport.findById(req.params.id);
+    if (!report) throw new ApiError(404, 'Verification report not found');
+    const project = await Project.findById(report.projectId);
+    if (!project) throw new ApiError(404, 'Project not found');
+    const { Workspace } = await import('../models/Workspace');
+    const ws = await Workspace.findById(project.workspaceId);
+    const membership = ws?.members.find(
+      (m) => m.userId.toString() === req.user!._id.toString() && m.status === 'active'
+    );
+    if (!membership && req.user!.platformRole !== 'admin') throw new ApiError(403, 'Not a member of this workspace');
+    const role = membership?.role;
+    if (!['owner', 'lead', 'reviewer', 'legal_reviewer'].includes(role || '') && req.user!.platformRole !== 'admin') {
+      throw new ApiError(403, 'Your role cannot override verification reports');
+    }
+    if (report.status === 'passed') throw new ApiError(409, 'This report already passed — no override needed');
+    if (report.override?.at) throw new ApiError(409, 'This report already carries an override');
+
+    report.override = { reason: body.reason, byName: req.user!.name, byId: req.user!._id, at: new Date() };
+    await report.save();
+
+    audit({
+      workspaceId: project.workspaceId.toString(),
+      projectId: project._id.toString(),
+      actorId: req.user!._id.toString(),
+      action: 'verification.override',
+      entityType: 'verification_report',
+      entityId: report._id.toString(),
+      before: { status: report.status, override: null },
+      after: { status: report.status, reason: body.reason },
+      ipAddress: clientIp(req),
+    });
+
+    res.json({ report });
+  })
+);
+
 /* ---------------- manual content editing (Script / Storyboard editors) ---------------- */
 
 const planSchema = z
@@ -679,12 +801,11 @@ generationRouter.patch(
 
 /* ---------------- provenance passport ---------------- */
 
-generationRouter.get(
-  '/projects/:id/provenance',
-  requireProject(),
-  asyncHandler(async (req: AuthedRequest, res) => {
-    const project = req.project!;
-    const ws = req.workspace!;
+/** Builds the full Provenance Passport (spec §15) for display and export. */
+async function buildProvenancePassport(
+  project: NonNullable<AuthedRequest['project']>,
+  ws: NonNullable<AuthedRequest['workspace']>
+): Promise<Record<string, unknown>> {
     const { inputs, conflicts, assets, contract } = await projectContext(project._id);
 
     const [members, tasks, reviews, contracts, reports] = await Promise.all([
@@ -702,7 +823,7 @@ generationRouter.get(
     const modelsUsed = Array.from(new Set(tasks.map((t) => t.modelName)));
     const generationCost = tasks.reduce((sum, t) => sum + (t.actualCost || 0), 0);
 
-    res.json({
+    return {
       project: {
         id: project._id.toString(),
         title: project.title,
@@ -802,9 +923,120 @@ generationRouter.get(
         modelsUsed.length > 0
           ? `AI-assisted output generated with locally hosted models: ${modelsUsed.join(', ')}. Every AI action is listed above with its model and cost.`
           : 'No AI generation has run on this project yet.',
-    });
+    };
+}
+
+generationRouter.get(
+  '/projects/:id/provenance',
+  requireProject(),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    res.json(await buildProvenancePassport(req.project!, req.workspace!));
   })
 );
+
+/* Spec 15.6/15.7 — export the passport as downloadable JSON or PDF. */
+generationRouter.get(
+  '/provenance/:id/export/json',
+  requireProject(),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const payload = await buildProvenancePassport(req.project!, req.workspace!);
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="provenance-${req.params.id}.json"`);
+    res.send(JSON.stringify(payload, null, 2));
+  })
+);
+
+generationRouter.get(
+  '/provenance/:id/export/pdf',
+  requireProject(),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const payload = await buildProvenancePassport(req.project!, req.workspace!);
+    const pdf = textToPdf('ReadyForge Provenance Passport', passportLines(payload));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="provenance-${req.params.id}.pdf"`);
+    res.send(Buffer.from(pdf, 'latin1'));
+  })
+);
+
+/** Flattens the passport into printable lines for the PDF export. */
+function passportLines(payload: Record<string, unknown>): string[] {
+  const lines: string[] = ['ReadyForge - Provenance Passport', '=================================', ''];
+  const walk = (value: unknown, indent: string): void => {
+    if (Array.isArray(value)) {
+      value.forEach((v, i) => {
+        lines.push(`${indent}[${i + 1}]`);
+        walk(v, indent + '  ');
+      });
+    } else if (value && typeof value === 'object') {
+      for (const [k, v] of Object.entries(value)) {
+        if (v && typeof v === 'object') {
+          lines.push(`${indent}${k}:`);
+          walk(v, indent + '  ');
+        } else {
+          lines.push(`${indent}${k}: ${v === null || v === undefined ? '-' : String(v)}`);
+        }
+      }
+    } else {
+      lines.push(`${indent}${String(value)}`);
+    }
+  };
+  walk(payload, '');
+  return lines.map((l) => (l.length > 110 ? `${l.slice(0, 107)}...` : l));
+}
+
+/** Minimal dependency-free multi-page PDF writer (Helvetica text pages). */
+function textToPdf(title: string, lines: string[]): string {
+  const esc = (s: string) =>
+    s
+      .replace(/[^\x20-\x7E]/g, '?')
+      .replace(/\\/g, '\\\\')
+      .replace(/\(/g, '\\(')
+      .replace(/\)/g, '\\)');
+  const W = 612;
+  const H = 792;
+  const M = 40;
+  const LEAD = 11;
+  const perPage = Math.max(1, Math.floor((H - 2 * M) / LEAD));
+  const pages: string[][] = [];
+  for (let i = 0; i < lines.length; i += perPage) pages.push(lines.slice(i, i + perPage));
+  if (!pages.length) pages.push([title]);
+
+  const contentIds = pages.map((_, i) => 4 + i * 2);
+  const pageIds = pages.map((_, i) => 5 + i * 2);
+  const bodies: string[] = [];
+  bodies[1] = '<< /Type /Catalog /Pages 2 0 R >>';
+  bodies[2] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pages.length} >>`;
+  bodies[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>';
+  pages.forEach((page, i) => {
+    const stream = [
+      'BT',
+      '/F1 8.5 Tf',
+      `${M} ${H - M} Td`,
+      `${LEAD} TL`,
+      ...page.map((l) => `(${esc(l)}) Tj T*`),
+      'ET',
+    ].join('\n');
+    bodies[contentIds[i]] = `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
+    bodies[pageIds[i]] =
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] ` +
+      `/Resources << /Font << /F1 3 0 R >> >> /Contents ${contentIds[i]} 0 R >>`;
+  });
+
+  let out = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  const total = 3 + 2 * pages.length;
+  for (let id = 1; id <= total; id++) {
+    offsets[id] = out.length;
+    out += `${id} 0 obj\n${bodies[id]}\nendobj\n`;
+  }
+  const xrefStart = out.length;
+  out += `xref\n0 ${total + 1}\n0000000000 65535 f \n`;
+  for (let id = 1; id <= total; id++) {
+    out += `${String(offsets[id]).padStart(10, '0')} 00000 n \n`;
+  }
+  out += `trailer\n<< /Size ${total + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
+  return out;
+}
 
 /* ---------------- claim passport (Enhancement 4) ---------------- */
 

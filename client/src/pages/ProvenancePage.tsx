@@ -13,7 +13,8 @@ import {
   Sparkles,
   UserCheck,
 } from 'lucide-react';
-import { api } from '../lib/api';
+import { api, getStoredToken } from '../lib/api';
+import { toast } from '../store/toast';
 import { Badge, Button, Card, EmptyState, ErrorBox, Loading, SectionTitle } from '../components/ui';
 import { AiSourceBadge } from '../components/widgets';
 
@@ -145,6 +146,27 @@ export default function ProvenancePage() {
     URL.revokeObjectURL(url);
   };
 
+  // Spec 15.7: server-rendered PDF export of the same passport payload.
+  const downloadPdf = async () => {
+    if (!data) return;
+    try {
+      const res = await fetch(`/api/provenance/${projectId}/export/pdf`, {
+        headers: { Authorization: `Bearer ${getStoredToken() || ''}` },
+      });
+      if (!res.ok) throw new Error(`PDF export failed (${res.status})`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `provenance-${data.project.title.replace(/\s+/g, '-').toLowerCase()}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success('Provenance passport exported as PDF');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'PDF export failed');
+    }
+  };
+
   if (isLoading) return <Loading label="Building provenance passport…" />;
   if (error) return <ErrorBox error={error} />;
   if (!data) return null;
@@ -157,9 +179,14 @@ export default function ProvenancePage() {
         title="Provenance Passport"
         subtitle={`Complete record for “${data.project.title}” — human inputs, AI generations with model and cost, approvals and verification.`}
         action={
-          <Button variant="primary" size="sm" onClick={download}>
-            <Download className="mr-1 h-4 w-4" /> Export JSON
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={download}>
+              <Download className="mr-1 h-4 w-4" /> Export JSON
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => void downloadPdf()}>
+              <Download className="mr-1 h-4 w-4" /> Export PDF
+            </Button>
+          </div>
         }
       />
 

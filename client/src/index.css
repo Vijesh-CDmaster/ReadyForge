@@ -7,21 +7,78 @@
     @apply antialiased;
   }
   body {
-    @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
+    @apply bg-slate-50 font-sans text-slate-900 dark:bg-slate-950 dark:text-slate-100;
   }
   ::selection {
     @apply bg-brand-500/30;
+  }
+
+  /* Keyboard focus: every raw control gets a visible ring without stealing the
+     focus styles components already define with focus-visible:ring-*. */
+  *:focus-visible {
+    outline: 2px solid #6366f1;
+    outline-offset: 2px;
+  }
+
+  /* Respect reduced-motion globally — no animation should delay content. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  /* Code, identifiers and technical values read in mono everywhere. */
+  code,
+  kbd,
+  samp,
+  pre {
+    @apply font-mono;
+  }
+
+  .dark ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  .dark ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-slate-700;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  .dark ::-webkit-scrollbar-track {
+    background: transparent;
   }
 }
 
 @layer components {
   .card {
-    @apply rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900;
+    @apply rounded-xl border border-slate-200 bg-white shadow-sm transition-colors dark:border-slate-800 dark:bg-slate-900;
   }
   .input-base {
     @apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition
       placeholder:text-slate-400 focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20
       disabled:cursor-not-allowed disabled:bg-slate-100 dark:border-slate-700 dark:bg-slate-900
       dark:placeholder:text-slate-500 dark:disabled:bg-slate-800;
+  }
+  /* Semantic surfaces (UI_AUDIT plan #3) */
+  .bg-app {
+    background-color: #fafafa;
+  }
+  .dark .bg-app,
+  .bg-app.dark {
+    background-color: #09090b;
+  }
+  .bg-panel {
+    background-color: #ffffff;
+  }
+  .dark .bg-panel {
+    background-color: #0f1013;
+  }
+  .kbd {
+    @apply inline-flex min-w-5 items-center justify-center rounded border border-slate-300 bg-slate-100 px-1 py-0.5 text-[10px] font-medium text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400;
   }
 }

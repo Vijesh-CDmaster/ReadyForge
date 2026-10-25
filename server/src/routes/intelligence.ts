@@ -150,7 +150,9 @@ intelligenceRouter.post(
     const { inputs, contract, assets, conflicts } = await context(project._id);
 
     if (!contract) throw new ApiError(409, 'Approve a Production Contract before generating variants.');
-    if (contract.status !== 'approved') throw new ApiError(409, `Contract is ${contract.status} — variants inherit an approved contract.`);
+    if (contract.status !== 'approved' && contract.status !== 'locked') {
+      throw new ApiError(409, `Contract is ${contract.status} — variants inherit an approved contract.`);
+    }
     const uncleared = assets.filter(
       (a) => a.licenseStatus === 'unknown' || a.licenseStatus === 'restricted' || a.licenseStatus === 'expired'
     );

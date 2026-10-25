@@ -39,6 +39,8 @@ async function serialize(list: Array<Record<string, any>>) {
     detectedBy: c.detectedBy,
     recommendedAction: c.recommendedAction,
     impactIfUnresolved: c.impactIfUnresolved,
+    inputAId: c.inputAId ? String(c.inputAId) : null,
+    inputBId: c.inputBId ? String(c.inputBId) : null,
     inputA: c.inputAId ? { id: String(c.inputAId), ...inputMap.get(String(c.inputAId)) } : null,
     inputB: c.inputBId ? { id: String(c.inputBId), ...inputMap.get(String(c.inputBId)) } : null,
     assignedTo: c.assignedToId ? { id: String(c.assignedToId), ...userMap.get(String(c.assignedToId)) } : null,
@@ -98,17 +100,29 @@ async function computeRecommendation(conflict: import('../models/Conflict').ICon
 
   const sA = score(optionA, inputA!);
   const sB = score(optionB, inputB!);
-  const recommended: 'A' | 'B' | null = sA === sB ? null : sA > sB ? 'A' : 'B';
+  const tied = sA === sB;
+  let recommended: 'A' | 'B' | null = tied ? null : sA > sB ? 'A' : 'B';
+  if (recommended === null) {
+    // Full tie (same authority, same status, same confidence): still give one-click
+    // resolution a concrete action — prefer approved, then higher confidence, then Option A.
+    if (inputA!.status === 'approved' && inputB!.status !== 'approved') recommended = 'A';
+    else if (inputB!.status === 'approved' && inputA!.status !== 'approved') recommended = 'B';
+    else if ((inputA!.confidence ?? 0.5) !== (inputB!.confidence ?? 0.5)) {
+      recommended = (inputA!.confidence ?? 0.5) > (inputB!.confidence ?? 0.5) ? 'A' : 'B';
+    } else recommended = 'A';
+  }
 
   const winner = recommended === 'A' ? optionA : optionB;
   const reason =
-    recommended === null
-      ? `Both inputs carry equal authority and confidence (${optionA.creatorRole || 'unknown'} vs ${optionB.creatorRole || 'unknown'}) — a human decision is required.`
-      : `Recommended: Option ${recommended} — supplied by the ${winner!.creatorRole || 'member'}${
-          (recommended === 'A' ? inputA! : inputB!).status === 'approved' ? ' and already approved in the ledger' : ''
-        }, the authorised role for ${conflict.conflictType} decisions${
-          rank(optionA.creatorRole) === rank(optionB.creatorRole) ? ', with higher supplier confidence as the tie-break' : ''
-        }. ${conflict.recommendedAction || ''}`.trim();
+    `Recommended: Option ${recommended} — supplied by the ${winner!.creatorRole || 'member'}${
+      (recommended === 'A' ? inputA! : inputB!).status === 'approved' ? ' and already approved in the ledger' : ''
+    }, the authorised role for ${conflict.conflictType} decisions${
+      tied
+        ? ' (inputs scored equally — the tie was broken by approval status, then supplier confidence, then the first-stated option)'
+        : rank(optionA.creatorRole) === rank(optionB.creatorRole)
+          ? ', with higher supplier confidence as the tie-break'
+          : ''
+    }. ${conflict.recommendedAction || ''}`.trim();
 
   return { optionA, optionB, recommended, reason };
 }
@@ -271,7 +285,14 @@ conflictsRouter.patch(
       ipAddress: clientIp(req),
     });
 
-    res.json({ ok: true, recommended: rec.recommended, reason: rec.reason, applied: [winnerId, loserId] });
+    res.json({
+      ok: true,
+      resolved: true,
+      status: conflict.status,
+      recommended: rec.recommended,
+      reason: rec.reason,
+      applied: [winnerId, loserId],
+    });
   })
 );
 
@@ -389,7 +410,7 @@ conflictsRouter.patch(
       ipAddress: clientIp(req),
     });
 
-    res.json({ ok: true, applied });
+    res.json({ ok: true, resolved: true, status: conflict.status, applied });
   })
 );
 

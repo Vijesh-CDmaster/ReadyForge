@@ -116,7 +116,8 @@ function outlineFallback(project: IProject, contract: IProductionContract): { ou
 
 export async function generateScript(
   project: IProject,
-  contract: IProductionContract
+  contract: IProductionContract,
+  tasteDirection?: string
 ): Promise<AiResult<{ script: string }>> {
   return aiJson<{ script: string }>({
     system: `You are ReadyForge's Script Writer.
@@ -128,10 +129,17 @@ VISUAL: what is on screen
 VO: spoken line
 DURATION: seconds
 Rules: match the target duration, use the contract tone, use ONLY approved facts,
-never invent numbers or offers, include captions where accessibility requires it.`,
-    user: contractFacts(project, contract),
+never invent numbers or offers, include captions where accessibility requires it.
+Where the Creative Taste DNA below conflicts with the contract, the contract wins —
+the taste only shapes how lines and visuals are expressed.`,
+    user: `${contractFacts(project, contract)}${tasteBlock(tasteDirection)}`,
     fallback: () => scriptFallback(project, contract),
   });
+}
+
+/** Appends the creator's taste direction to a generation prompt (nullable). */
+export function tasteBlock(tasteDirection?: string): string {
+  return tasteDirection ? `\n\nCreative Taste DNA:\n${tasteDirection}` : '';
 }
 
 function scriptFallback(project: IProject, contract: IProductionContract): { script: string } {
@@ -183,7 +191,8 @@ export interface SceneDraft {
 export async function generateStoryboard(
   project: IProject,
   contract: IProductionContract,
-  script: string
+  script: string,
+  tasteDirection?: string
 ): Promise<AiResult<{ scenes: SceneDraft[] }>> {
   const out = await aiJson<{ scenes: unknown }>({
     system: `You are ReadyForge's Storyboard Planner.
@@ -191,8 +200,9 @@ Convert the script into storyboard scenes for the approved Production Contract.
 Return JSON: { "scenes": [{ "sceneNumber": 1, "title": "...", "description": "...",
 "visualDirection": "...", "voiceover": "...", "durationSeconds": 5 }] }.
 One scene per script block, in order. Durations must sum to the target duration.
-Visual direction must respect the contract brand rules. Do not invent facts.`,
-    user: `${contractFacts(project, contract)}\n\nScript:\n${script}`,
+Visual direction must respect the contract brand rules. Do not invent facts.
+The Creative Taste DNA below shapes camera, pacing and transitions only — contract rules still win.`,
+    user: `${contractFacts(project, contract)}${tasteBlock(tasteDirection)}\n\nScript:\n${script}`,
     fallback: () => storyboardFallback(project, contract, script) as { scenes: unknown },
   });
 

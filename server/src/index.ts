@@ -17,6 +17,7 @@ import { notificationsRouter } from './routes/notifications';
 import { generationRouter } from './routes/generation';
 import { analyticsRouter } from './routes/analytics';
 import { intelligenceRouter } from './routes/intelligence';
+import { tasteRouter } from './routes/taste';
 
 export function createApp() {
   const app = express();
@@ -38,17 +39,47 @@ export function createApp() {
     res.json({ ok: true, service: 'readyforge-api', ai: Boolean(config.ai.apiKey), time: new Date().toISOString() })
   );
 
-  app.use('/api/auth', authRouter);
-  app.use('/api/workspaces', workspacesRouter);
-  app.use('/api/projects', projectsRouter);
-  app.use('/api', inputsRouter);
-  app.use('/api', conflictsRouter);
-  app.use('/api', assetsRouter);
-  app.use('/api/ai', aiRouter);
-  app.use('/api/notifications', notificationsRouter);
-  app.use('/api', generationRouter);
-  app.use('/api', analyticsRouter);
-  app.use('/api', intelligenceRouter);
+  /*
+   * Unknown endpoints must answer 404, not fall into router-level auth (which
+   * would answer 401 for every typo'd path). We record the first path segment
+   * of every registered route and reject anything else up front.
+   */
+  const knownRoots = new Set<string>();
+  const mount = (prefix: string, router: express.Router) => {
+    const stack = (router as unknown as { stack: Array<{ route?: { path: string | string[] } }> }).stack;
+    for (const layer of stack) {
+      if (!layer.route) continue;
+      const paths = Array.isArray(layer.route.path) ? layer.route.path : [layer.route.path];
+      for (const p of paths) {
+        const segs = String(p).split('/').filter(Boolean);
+        const first = segs[0] && !segs[0].startsWith(':') ? `/${segs[0]}` : '';
+        knownRoots.add(`${prefix}${first}`.replace(/\/+$/, '') || '/');
+      }
+    }
+    app.use(prefix, router);
+  };
+
+  app.use((req, res, next) => {
+    if (!req.path.startsWith('/api')) return next();
+    const path = req.path.replace(/\/+$/, '') || '/api';
+    for (const root of knownRoots) {
+      if (path === root || path.startsWith(`${root}/`)) return next();
+    }
+    res.status(404).json({ error: 'Endpoint not found' });
+  });
+
+  mount('/api/auth', authRouter);
+  mount('/api/workspaces', workspacesRouter);
+  mount('/api/projects', projectsRouter);
+  mount('/api', inputsRouter);
+  mount('/api', conflictsRouter);
+  mount('/api', assetsRouter);
+  mount('/api/ai', aiRouter);
+  mount('/api/notifications', notificationsRouter);
+  mount('/api', generationRouter);
+  mount('/api', analyticsRouter);
+  mount('/api', intelligenceRouter);
+  mount('/api/taste', tasteRouter);
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Endpoint not found' }));
   app.use(errorHandler);

@@ -18,6 +18,15 @@ export type InputType = (typeof INPUT_TYPES)[number];
 export const SOURCE_TYPES = ['user_input', 'uploaded_document', 'url', 'approved_library', 'ai_extracted'] as const;
 export type SourceType = (typeof SOURCE_TYPES)[number];
 
+export interface IInputHistoryEntry {
+  version: number;
+  title: string;
+  content: string;
+  status: string;
+  changedById?: Types.ObjectId;
+  changedAt?: Date;
+}
+
 export interface IKnowledgeInput {
   _id: Types.ObjectId;
   projectId: Types.ObjectId;
@@ -33,6 +42,8 @@ export interface IKnowledgeInput {
   confidence: number;
   tags: string[];
   version: number;
+  /** Append-only snapshots of every edit/status change (newest last). */
+  history: IInputHistoryEntry[];
   approvedById?: Types.ObjectId;
   approvedAt?: Date;
   expiresAt?: Date;
@@ -60,6 +71,22 @@ const knowledgeInputSchema = new Schema<IKnowledgeInput>(
     confidence: { type: Number, default: 0.5, min: 0, max: 1 },
     tags: { type: [String], default: [] },
     version: { type: Number, default: 1 },
+    history: {
+      type: [
+        new Schema(
+          {
+            version: { type: Number, required: true },
+            title: { type: String, default: '' },
+            content: { type: String, default: '' },
+            status: { type: String, default: '' },
+            changedById: { type: Schema.Types.ObjectId, ref: 'User' },
+            changedAt: { type: Date },
+          },
+          { _id: false }
+        ),
+      ],
+      default: [],
+    },
     approvedById: { type: Schema.Types.ObjectId, ref: 'User' },
     approvedAt: { type: Date },
     expiresAt: { type: Date },

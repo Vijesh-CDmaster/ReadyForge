@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { KnowledgeInput, INPUT_TYPES, SOURCE_TYPES } from '../models/KnowledgeInput';
+import { KnowledgeInput, IKnowledgeInput, INPUT_TYPES, SOURCE_TYPES } from '../models/KnowledgeInput';
 import { Project } from '../models/Project';
 import { User } from '../models/User';
 import { requireAuth, requireProject, AuthedRequest } from '../middleware/auth';
@@ -126,6 +126,7 @@ inputsRouter.patch(
       input.approvedById = undefined;
       input.approvedAt = undefined;
     }
+    pushHistory(input, req.user!._id);
     await input.save();
 
     audit({
@@ -190,6 +191,7 @@ inputsRouter.post(
     input.status = 'approved';
     input.approvedById = req.user!._id;
     input.approvedAt = new Date();
+    pushHistory(input, req.user!._id);
     await input.save();
 
     audit({
@@ -222,6 +224,7 @@ inputsRouter.post(
 
     const before = { status: input.status };
     input.status = 'disputed';
+    pushHistory(input, req.user!._id);
     await input.save();
 
     audit({
@@ -237,6 +240,45 @@ inputsRouter.post(
     });
 
     res.json({ input: (await serialize([input as never]))[0] });
+  })
+);
+
+/** Snapshot the input's current state onto its append-only history (spec 7.8). */
+function pushHistory(input: IKnowledgeInput, changedById: unknown): void {
+  input.history = input.history || [];
+  input.history.push({
+    version: input.version,
+    title: input.title,
+    content: input.content,
+    status: input.status,
+    changedById: changedById as IKnowledgeInput['history'][number]['changedById'],
+    changedAt: new Date(),
+  });
+}
+
+/* version history */
+inputsRouter.get(
+  '/inputs/:id/history',
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const input = await KnowledgeInput.findById(req.params.id);
+    if (!input) throw new ApiError(404, 'Input not found');
+    const project = await Project.findById(input.projectId);
+    if (!project) throw new ApiError(404, 'Project not found');
+    await membership(req, project.workspaceId); // throws 403 for non-members
+
+    const entries = (input.history || []).map((h, idx) => ({
+      id: `${input._id}-${idx}`,
+      version: h.version,
+      title: h.title,
+      content: h.content,
+      status: h.status,
+      changedAt: h.changedAt,
+    }));
+    res.json({
+      currentVersion: input.version,
+      // v1 is implicit: the input as created, when no snapshots exist yet.
+      history: entries,
+    });
   })
 );
 

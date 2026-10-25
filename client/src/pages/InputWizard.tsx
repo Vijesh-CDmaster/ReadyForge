@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Sparkles, HelpCircle, ArrowRight, CheckCircle2, Users } from 'lucide-react';
 import { api } from '../lib/api';
 import { Button, Card, ErrorBox, Input, Loading, Select, Textarea, Badge, cx } from '../components/ui';
@@ -21,6 +21,7 @@ interface QuestionSet {
   questions: Question[];
   aiSource: string;
   model: string;
+  tasteConfig?: { count: number; rationale: string };
 }
 
 const KIND_LABELS: Record<string, string> = {
@@ -43,8 +44,18 @@ export default function InputWizard() {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [questionSet, setQuestionSet] = useState<QuestionSet | null>(null);
 
+  // Personalised question flow (#20): Workflow DNA + taste confidence pick the count.
+  const { data: tasteConfig } = useQuery({
+    queryKey: ['taste', 'questions', project?.id],
+    queryFn: () =>
+      api.get<{ count: number; rationale: string; editingMode: string }>(`/api/taste/questions/${project!.id}`),
+    enabled: Boolean(project?.id),
+    retry: false,
+  });
+
   const generate = useMutation({
-    mutationFn: () => api.post<QuestionSet>('/api/ai/generate-questions', { projectId: project!.id, count: 4 }),
+    mutationFn: (count: number) =>
+      api.post<QuestionSet>('/api/ai/generate-questions', { projectId: project!.id, count }),
     onSuccess: (data) => {
       setQuestionSet(data);
       if (!data.questions.length) toast.info('No further questions — the ledger looks complete.');
@@ -96,10 +107,20 @@ export default function InputWizard() {
               fields and detected risks. Each answer becomes a Knowledge Input.
             </p>
           </div>
-          <Button onClick={() => generate.mutate()} loading={generate.isPending} disabled={save.isPending}>
+          <Button
+            onClick={() => generate.mutate(tasteConfig?.count ?? 4)}
+            loading={generate.isPending}
+            disabled={save.isPending}
+          >
             {questionSet ? 'Refresh questions' : 'Start / refresh questions'}
           </Button>
         </div>
+
+        {tasteConfig?.rationale && (
+          <p className="mt-2 text-xs text-slate-400" title="Why this many questions">
+            Personalised for your taste: {tasteConfig.rationale}
+          </p>
+        )}
 
         {questionSet && (
           <div className="mt-3 flex items-center gap-2">

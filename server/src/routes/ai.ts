@@ -7,6 +7,8 @@ import { audit, clientIp } from '../audit';
 import { classifyProject } from '../ai/classify';
 import { generateQuestions } from '../ai/questions';
 import { verifyClaims } from '../ai/claims';
+import { adaptiveQuestionCount } from '../ai/taste';
+import { TasteProfile } from '../models/TasteProfile';
 import { Project } from '../models/Project';
 import { KnowledgeInput } from '../models/KnowledgeInput';
 
@@ -47,10 +49,16 @@ aiRouter.post(
     if (!member && req.user!.platformRole !== 'admin') throw new ApiError(403, 'Not a member of this project workspace');
 
     const inputs = await KnowledgeInput.find({ projectId: project._id });
+
+    // Personalised question flow (#20): Workflow DNA + taste confidence trim or widen the set.
+    const taste = await TasteProfile.findOne({ userId: req.user!._id, projectId: { $exists: false } });
+    const adaptive = adaptiveQuestionCount(taste, body.count ?? 6);
+    const count = body.count ?? Math.min(6, adaptive.count);
+
     const result = await generateQuestions({
       project,
       inputs: inputs as never,
-      count: body.count,
+      count,
     });
 
     audit({
@@ -64,7 +72,12 @@ aiRouter.post(
       ipAddress: clientIp(req),
     });
 
-    res.json({ questions: result.questions, aiSource: result.source, model: result.model });
+    res.json({
+      questions: result.questions,
+      aiSource: result.source,
+      model: result.model,
+      tasteConfig: { count, rationale: adaptive.rationale },
+    });
   })
 );
 

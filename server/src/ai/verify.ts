@@ -299,6 +299,23 @@ Never invent facts. If evidence is missing, mark the check "warning".`,
     }
   }
 
+  /* Spec 13.6 — every failing or warning check must carry a suggested fix. */
+  const DEFAULT_FIX: Record<string, string> = {
+    claim_verification: 'Cite an approved fact for this claim, or remove the claim.',
+    brand_fit: 'Rewrite to match the Brand DNA and the contract brand rules.',
+    intent_alignment: 'Restate the key message and CTA from the contract.',
+    scene_completeness: 'Fill the missing scene fields before approval.',
+    accessibility: 'Add captions, alt text and contrast notes before publishing.',
+    rights: 'Clear or replace the licence before using this asset.',
+    budget: 'Reduce scope or request budget approval before generating.',
+    tone: 'Rewrite to match the contract tone.',
+  };
+  for (const c of checks) {
+    if (c.status !== 'passed' && !c.suggestedFix) {
+      c.suggestedFix = DEFAULT_FIX[c.checkType] || 'Fix the flagged issue and re-run verification.';
+    }
+  }
+
   const passed = checks.filter((c) => c.status === 'passed').length;
   const failed = checks.filter((c) => c.status === 'failed');
   const warned = checks.filter((c) => c.status === 'warning');
