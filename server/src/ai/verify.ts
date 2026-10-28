@@ -17,6 +17,23 @@ import { CheckStatus, IVerificationCheck } from '../models/VerificationReport';
  * NLI model — so the trained model participates in final verification too.
  */
 
+/**
+ * `evidence` is a String schema field (VerificationReport), but the model sometimes
+ * returns an array of quoted lines — that Cast-errored the whole report with a 500.
+ * Normalise instead of discarding model-generated evidence.
+ */
+export function normalizeEvidence(evidence: unknown): string {
+  if (Array.isArray(evidence)) {
+    const parts = evidence
+      .filter((v): v is string | number => typeof v === 'string' || typeof v === 'number')
+      .map((v) => String(v).trim())
+      .filter(Boolean);
+    return parts.length ? parts.join('; ') : 'Evidence unavailable.';
+  }
+  if (typeof evidence === 'string' && evidence.trim()) return evidence.trim();
+  return 'Evidence unavailable.';
+}
+
 export interface VerifyInput {
   project: IProject;
   contract: IProductionContract;
@@ -293,7 +310,7 @@ Never invent facts. If evidence is missing, mark the check "warning".`,
         status: (['passed', 'warning', 'failed'].includes(c.status) ? c.status : 'warning') as CheckStatus,
         severity: c.severity || 'medium',
         message: c.message || '',
-        evidence: c.evidence || 'Evidence unavailable.',
+        evidence: normalizeEvidence(c.evidence),
         suggestedFix: c.suggestedFix,
       });
     }

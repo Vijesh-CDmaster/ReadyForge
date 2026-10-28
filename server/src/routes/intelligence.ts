@@ -31,6 +31,33 @@ async function context(projectId: unknown) {
   return { inputs, conflicts, assets, tasks, contract };
 }
 
+/**
+ * CreativeVariant.audience is a String field (max 400 chars), but the model
+ * sometimes returns a structured object like { ageRange, gender } — which
+ * Cast-errored insertMany with a 500. Normalise to readable text instead of
+ * storing "[object Object]", and respect the schema's 400-char limit.
+ */
+export function normalizeVariantAudience(value: unknown, fallback: string): string {
+  const fromParts = (parts: unknown[]): string => {
+    const text = parts
+      .filter((v): v is string | number => typeof v === 'string' || typeof v === 'number')
+      .map((v) => String(v).trim())
+      .filter(Boolean)
+      .join(', ');
+    return text ? text.slice(0, 400) : '';
+  };
+
+  if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 400);
+  if (Array.isArray(value)) {
+    const arr = fromParts(value);
+    if (arr) return arr;
+  } else if (value && typeof value === 'object') {
+    const obj = fromParts(Object.values(value as Record<string, unknown>));
+    if (obj) return obj;
+  }
+  return fallback.slice(0, 400);
+}
+
 /* ---------------- Campaign Risk Score ---------------- */
 
 intelligenceRouter.get(
@@ -247,7 +274,7 @@ Keep each script under 180 words.`,
         name: d.name,
         hook: d.hook,
         tone: d.tone,
-        audience: d.audience,
+        audience: normalizeVariantAudience(d.audience, project.audience || 'Quality-focused buyers'),
         cta: d.cta,
         format: d.format,
         durationSeconds: d.durationSeconds || 0,

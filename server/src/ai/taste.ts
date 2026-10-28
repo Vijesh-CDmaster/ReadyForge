@@ -249,6 +249,20 @@ const MOOD_RULES: Array<{ match: RegExp; direction: Omit<MoodDirection, 'mood' |
 ];
 
 /**
+ * Fields of a MoodDirection the /taste/mood route and profile merge actually read.
+ * The model occasionally returns null/omitted keys, and `d.music.slice(...)` on a
+ * null used to crash the apply path with a 500.
+ */
+const MOOD_DIRECTION_FIELDS = ['color', 'motion', 'music', 'typography', 'pacing', 'story', 'summary'] as const;
+
+/** A model answer is accepted only when every consumed field is a non-empty string. */
+function isValidMoodDirection(d: unknown): d is MoodDirection {
+  if (!d || typeof d !== 'object') return false;
+  const o = d as Record<string, unknown>;
+  return MOOD_DIRECTION_FIELDS.every((f) => typeof o[f] === 'string' && o[f].trim().length > 0);
+}
+
+/**
  * Converts free-form mood words into concrete creative directions.
  * Rule engine first (deterministic, honest), LLM as an enhancement when configured.
  */
@@ -283,9 +297,16 @@ Keep each value short and actionable (max 120 chars). Do not invent brand claims
     fallback,
   });
 
-  const direction = out.data && out.data.color ? out.data : fallback();
+  // Rejecting a malformed model answer means the fallback produced the data —
+  // attribute it honestly, exactly like a parse failure would.
+  const accepted = isValidMoodDirection(out.data);
+  const direction = accepted ? out.data : fallback();
   if (opts.platform) direction.summary = `${direction.summary} Tuned for ${opts.platform}.`;
-  return { direction, source: out.source, model: out.model };
+  return {
+    direction,
+    source: accepted ? out.source : 'rule_engine',
+    model: accepted ? out.model : 'readyforge-rules',
+  };
 }
 
 /* ------------------------------------------------------------------ *
