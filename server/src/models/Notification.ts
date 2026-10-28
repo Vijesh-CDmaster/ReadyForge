@@ -11,6 +11,7 @@ export const NOTIFICATION_TYPES = [
   'contract_rejected',
   'project_assigned',
   'question_assigned',
+  'mention',
 ] as const;
 
 export interface INotification {

@@ -6,6 +6,17 @@ const num = (v: string | undefined, d: number) => {
   return Number.isFinite(n) && n > 0 ? n : d;
 };
 
+const isProd = process.env.NODE_ENV === 'production';
+
+// Dev fallbacks keep local startup zero-config, but a production server must never
+// sign tokens with a known public secret — refuse to boot instead.
+if (isProd && (!process.env.JWT_ACCESS_SECRET || !process.env.JWT_REFRESH_SECRET)) {
+  throw new Error(
+    'JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must both be set when NODE_ENV=production. ' +
+      'Refusing to start with development fallback secrets. See .env.example.'
+  );
+}
+
 export const config = {
   port: num(process.env.PORT, 4000),
   corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:5173',
@@ -28,7 +39,7 @@ export const config = {
     maxMb: num(process.env.MAX_UPLOAD_MB, 25),
   },
   dataDir: path.resolve(__dirname, '..', '.data'),
-  isProd: process.env.NODE_ENV === 'production',
+  isProd,
 };
 
 export const isAiConfigured = () => Boolean(config.ai.apiKey);

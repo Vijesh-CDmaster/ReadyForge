@@ -20,6 +20,8 @@ import {
   Search,
   ChevronRight,
   Palette,
+  UserCog,
+  Rocket,
 } from 'lucide-react';
 import { useAuthStore } from '../store/auth';
 import { api } from '../lib/api';
@@ -68,6 +70,9 @@ const TAB_LABELS: Record<string, string> = {
   lab: 'Campaign lab',
   provenance: 'Provenance',
   taste: 'Creative taste',
+  profile: 'Profile',
+  admin: 'Admin',
+  start: 'Getting started',
 };
 
 function Breadcrumbs({ projectTitle }: { projectTitle?: string }) {
@@ -188,6 +193,8 @@ export function AppShell() {
         { to: '/app/projects/new', label: 'New project', icon: Plus },
         { to: '/app/notifications', label: 'Notifications', icon: Bell, badge: notif?.unread || 0 },
         { to: '/app/taste', label: 'Creative Taste', icon: Palette },
+        { to: '/app/start', label: 'Getting started', icon: Rocket },
+        ...(user?.platformRole === 'admin' ? [{ to: '/app/admin', label: 'Admin', icon: Settings }] : []),
         ...(activeWs
           ? [
               { to: `/app/workspaces/${activeWs}/analytics`, label: 'Analytics', icon: BarChart3 },
@@ -386,6 +393,16 @@ export function AppShell() {
                   <p className="truncate text-xs text-slate-500">{user?.email}</p>
                 </div>
                 <div className="my-1 border-t border-slate-200 dark:border-slate-700" />
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    close();
+                    navigate('/app/profile');
+                  }}
+                  className="flex w-full items-center gap-2 rounded px-2 py-2 text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+                >
+                  <UserCog className="h-4 w-4" aria-hidden /> Profile & settings
+                </button>
                 <button
                   role="menuitem"
                   onClick={() => {

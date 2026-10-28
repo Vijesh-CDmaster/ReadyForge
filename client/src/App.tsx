@@ -33,6 +33,12 @@ const CampaignLabPage = lazy(() => import('./pages/CampaignLabPage'));
 const AnalyticsPage = lazy(() => import('./pages/AnalyticsPage'));
 const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 const TastePage = lazy(() => import('./pages/TastePage'));
+const ProfilePage = lazy(() => import('./pages/ProfilePage'));
+const ResetPasswordPage = lazy(() => import('./pages/ResetPasswordPage'));
+const InvitePage = lazy(() => import('./pages/InvitePage'));
+const VerifyEmailPage = lazy(() => import('./pages/VerifyEmailPage'));
+const AdminPage = lazy(() => import('./pages/AdminPage'));
+const GettingStarted = lazy(() => import('./pages/GettingStarted'));
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, status } = useAuthStore();
@@ -62,6 +68,9 @@ export default function App() {
       <Route path="/" element={<Landing />} />
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
+      <Route path="/invite/:token" element={<InvitePage />} />
+      <Route path="/verify-email" element={<VerifyEmailPage />} />
 
       <Route
         path="/app"
@@ -72,6 +81,9 @@ export default function App() {
         }
       >
         <Route index element={<Dashboard />} />
+        <Route path="profile" element={<ProfilePage />} />
+        <Route path="admin" element={<AdminPage />} />
+        <Route path="start" element={<GettingStarted />} />
         <Route path="workspaces/new" element={<CreateWorkspace />} />
         <Route path="workspaces/:workspaceId" element={<WorkspaceDetail />} />
         <Route path="projects/new" element={<CreateProject />} />

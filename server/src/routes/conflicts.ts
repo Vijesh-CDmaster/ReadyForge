@@ -180,17 +180,21 @@ conflictsRouter.post(
       created.push(conflict);
 
       if (resolver) {
-        // in-app notification for the assigned resolver
+        // in-app notification for the assigned resolver — respecting their prefs
         const { Notification } = await import('../models/Notification');
-        void Notification.create({
-          userId: resolver.userId,
-          workspaceId: project.workspaceId,
-          projectId: project._id,
-          type: 'conflict_assigned',
-          title: `Conflict assigned: ${d.title}`,
-          message: d.description,
-          link: `/app/projects/${project._id}/conflicts`,
-        }).catch(() => undefined);
+        const { User, wantsNotification } = await import('../models/User');
+        const resolverUser = await User.findById(resolver.userId);
+        if (wantsNotification(resolverUser, 'conflict_assigned')) {
+          void Notification.create({
+            userId: resolver.userId,
+            workspaceId: project.workspaceId,
+            projectId: project._id,
+            type: 'conflict_assigned',
+            title: `Conflict assigned: ${d.title}`,
+            message: d.description,
+            link: `/app/projects/${project._id}/conflicts`,
+          }).catch(() => undefined);
+        }
       }
     }
 

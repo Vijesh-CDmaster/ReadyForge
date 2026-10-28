@@ -29,12 +29,42 @@ interface Classification {
   aiSource: string;
 }
 
+interface TemplateOption {
+  id: string;
+  kind: 'builtin' | 'custom';
+  name: string;
+  description: string;
+  projectType: string;
+  mode: 'solo' | 'team';
+  brief: {
+    objective: string;
+    audience: string;
+    tone: string;
+    callToAction: string;
+    budgetAmount?: number;
+    currency?: string;
+    tags: string[];
+  };
+}
+
 export default function CreateProject() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { workspaces, refreshMe } = useAuthStore();
   const [serverError, setServerError] = useState<string | null>(null);
   const [classification, setClassification] = useState<Classification | null>(null);
+  const [templateId, setTemplateId] = useState('');
+
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState(workspaces[0]?.id || '');
+
+  const { data: templateData } = useQuery({
+    queryKey: ['templates', selectedWorkspaceId],
+    queryFn: () => api.get<{ templates: TemplateOption[] }>(`/api/workspaces/${selectedWorkspaceId}/templates`),
+    enabled: Boolean(selectedWorkspaceId),
+    refetchOnWindowFocus: false,
+  });
+  const templates = templateData?.templates ?? [];
+  const activeTemplate = templates.find((t) => t.id === templateId) || null;
 
   const { isLoading } = useQuery({ queryKey: ['workspaces'], queryFn: async () => workspaces });
 
@@ -63,6 +93,8 @@ export default function CreateProject() {
         projectType: values.projectType,
         objective: values.objective || undefined,
         budget: values.budgetAmount ? { amount: values.budgetAmount, currency: 'INR' } : undefined,
+        // The server fills any brief fields left empty from this template.
+        templateId: templateId || undefined,
       }),
     onSuccess: async ({ project }) => {
       await refreshMe();
@@ -89,6 +121,18 @@ export default function CreateProject() {
   }
 
   const onSubmit = form.handleSubmit((values) => create.mutate(values));
+  const wsRegister = form.register('workspaceId');
+
+  const applyTemplate = (id: string) => {
+    setTemplateId(id);
+    const t = templates.find((x) => x.id === id);
+    if (!t) return;
+    form.setValue('projectType', t.projectType as FormValues['projectType']);
+    form.setValue('mode', t.mode);
+    if (t.brief.objective) form.setValue('objective', t.brief.objective);
+    if (typeof t.brief.budgetAmount === 'number') form.setValue('budgetAmount', t.brief.budgetAmount);
+    toast.success(`Template applied: ${t.name}`);
+  };
 
   return (
     <div className="mx-auto max-w-2xl">
@@ -101,8 +145,48 @@ export default function CreateProject() {
         <form onSubmit={onSubmit} noValidate>
           {serverError && <ErrorBox error={new Error(serverError)} className="mb-4" />}
 
+          <Field label="Start from a template" hint="optional — prefills type, mode, objective and budget">
+            <Select value={templateId} onChange={(e) => applyTemplate(e.target.value)}>
+              <option value="">No template (start blank)</option>
+              <optgroup label="Built-in">
+                {templates
+                  .filter((t) => t.kind === 'builtin')
+                  .map((t) => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+              </optgroup>
+              {templates.some((t) => t.kind === 'custom') && (
+                <optgroup label="Saved in this workspace">
+                  {templates
+                    .filter((t) => t.kind === 'custom')
+                    .map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                </optgroup>
+              )}
+            </Select>
+          </Field>
+
+          {activeTemplate && (
+            <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+              <p className="font-medium">{activeTemplate.name} — {activeTemplate.description}</p>
+              <p className="mt-1">
+                Audience: {activeTemplate.brief.audience || 'set in the wizard'} · Tone:{' '}
+                {activeTemplate.brief.tone || 'set in the wizard'} · CTA:{' '}
+                {activeTemplate.brief.callToAction || 'set in the wizard'}
+              </p>
+            </div>
+          )}
+
           <Field label="Workspace">
-            <Select {...form.register('workspaceId')}>
+            <Select
+              {...wsRegister}
+              onChange={(e) => {
+                wsRegister.onChange(e);
+                setSelectedWorkspaceId(e.target.value);
+                setTemplateId('');
+              }}
+            >
               {workspaces.map((w) => (
                 <option key={w.id} value={w.id}>
                   {w.name}

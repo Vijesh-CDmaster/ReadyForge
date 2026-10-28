@@ -8,6 +8,8 @@ import { connectDb } from './db';
 import { errorHandler } from './http';
 import { authRouter } from './routes/auth';
 import { workspacesRouter } from './routes/workspaces';
+import { invitationsRouter } from './routes/invitations';
+import { templatesRouter } from './routes/templates';
 import { projectsRouter } from './routes/projects';
 import { inputsRouter } from './routes/inputs';
 import { conflictsRouter } from './routes/conflicts';
@@ -18,6 +20,8 @@ import { generationRouter } from './routes/generation';
 import { analyticsRouter } from './routes/analytics';
 import { intelligenceRouter } from './routes/intelligence';
 import { tasteRouter } from './routes/taste';
+import { commentsRouter } from './routes/comments';
+import { adminRouter } from './routes/admin';
 
 export function createApp() {
   const app = express();
@@ -70,6 +74,8 @@ export function createApp() {
 
   mount('/api/auth', authRouter);
   mount('/api/workspaces', workspacesRouter);
+  mount('/api', invitationsRouter);
+  mount('/api', templatesRouter);
   mount('/api/projects', projectsRouter);
   mount('/api', inputsRouter);
   mount('/api', conflictsRouter);
@@ -80,6 +86,8 @@ export function createApp() {
   mount('/api', analyticsRouter);
   mount('/api', intelligenceRouter);
   mount('/api/taste', tasteRouter);
+  mount('/api', commentsRouter);
+  mount('/api/admin', adminRouter);
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Endpoint not found' }));
   app.use(errorHandler);

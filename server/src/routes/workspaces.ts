@@ -99,7 +99,23 @@ workspacesRouter.post(
       after: { name: workspace.name },
       ipAddress: clientIp(req),
     });
-    res.status(201).json({ workspace });
+    // Serialized like GET /:id — clients navigate with `id`, not `_id`.
+    const users = await loadUsers(workspace.members.map((m) => m.userId));
+    res.status(201).json({
+      workspace: {
+        id: workspace._id.toString(),
+        name: workspace.name,
+        description: workspace.description,
+        ownerId: workspace.ownerId.toString(),
+        settings: workspace.settings,
+        brandDna: workspace.brandDna ?? null,
+        archivedAt: workspace.archivedAt ?? null,
+        role: 'owner',
+        createdAt: workspace.createdAt,
+        members: workspace.members.map((m) => serializeMember(m, users)),
+        projects: [],
+      },
+    });
   })
 );
 
@@ -108,9 +124,12 @@ workspacesRouter.get(
   '/',
   asyncHandler(async (req: AuthedRequest, res) => {
     const user = req.user!;
+    const includeArchived = req.query.includeArchived === '1';
     const workspaces = await Workspace.find({
       'members.userId': user._id,
       'members.status': 'active',
+      // Archived workspaces stay recoverable but hidden from the normal list.
+      ...(includeArchived ? {} : { $or: [{ archivedAt: null }, { archivedAt: { $exists: false } }] }),
     }).sort('-updatedAt');
     const projectCounts = await Project.aggregate([
       { $match: { workspaceId: { $in: workspaces.map((w) => w._id) } } },
@@ -129,10 +148,52 @@ workspacesRouter.get(
           projectCount: counts.get(w._id.toString()) || 0,
           settings: w.settings,
           ownerId: w.ownerId.toString(),
+          archivedAt: w.archivedAt ?? null,
           createdAt: w.createdAt,
         };
       })
     );
+  })
+);
+
+/* ---------- archive / restore (spec §2.1) ---------- */
+workspacesRouter.post(
+  '/:id/archive',
+  requireWorkspace(),
+  requireRole('owner'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const ws = req.workspace!;
+    ws.archivedAt = new Date();
+    await ws.save();
+    audit({
+      workspaceId: ws._id.toString(),
+      actorId: req.user!._id.toString(),
+      action: 'workspace.archive',
+      entityType: 'workspace',
+      entityId: ws._id.toString(),
+      ipAddress: clientIp(req),
+    });
+    res.json({ ok: true, archivedAt: ws.archivedAt });
+  })
+);
+
+workspacesRouter.post(
+  '/:id/restore',
+  requireWorkspace(),
+  requireRole('owner'),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const ws = req.workspace!;
+    ws.archivedAt = null;
+    await ws.save();
+    audit({
+      workspaceId: ws._id.toString(),
+      actorId: req.user!._id.toString(),
+      action: 'workspace.restore',
+      entityType: 'workspace',
+      entityId: ws._id.toString(),
+      ipAddress: clientIp(req),
+    });
+    res.json({ ok: true });
   })
 );
 
@@ -151,6 +212,7 @@ workspacesRouter.get(
       ownerId: ws.ownerId.toString(),
       settings: ws.settings,
       brandDna: ws.brandDna ?? null,
+      archivedAt: ws.archivedAt ?? null,
       role: req.membershipRole,
       createdAt: ws.createdAt,
       members: ws.members.filter((m) => m.status !== 'removed').map((m) => serializeMember(m, users)),

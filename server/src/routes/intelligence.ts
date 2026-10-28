@@ -15,6 +15,7 @@ import { computeCampaignRisk } from '../engines/riskScore';
 import { computeCostAtRisk } from '../engines/costAtRisk';
 import { computePreflightForecast } from '../engines/preflight';
 import { aiJson } from '../ai/client';
+import { chargeProjectBudget, refundProjectBudget } from '../services/budget';
 
 export const intelligenceRouter = Router();
 intelligenceRouter.use(requireAuth);
@@ -229,6 +230,15 @@ Keep each script under 180 words.`,
 
     const drafts = (Array.isArray(out.data) && out.data.length >= 2 ? out.data.slice(0, 2) : fallback());
 
+    const chargeCost = VARIANT_COST * drafts.length;
+    // Atomic hard-limit reservation — this used to be a read-then-write that could
+    // overspend the project's budget under concurrent requests.
+    await chargeProjectBudget({
+      projectId: project._id,
+      cost: chargeCost,
+      what: 'Generating the variant matrix',
+    });
+
     const created = await CreativeVariant.insertMany(
       drafts.map((d) => ({
         projectId: project._id,
@@ -247,7 +257,11 @@ Keep each script under 180 words.`,
         actualCost: VARIANT_COST,
         modelName: out.model,
       }))
-    );
+    ).catch(async (err) => {
+      // Nothing was created — release the reservation so a failed run costs nothing.
+      await refundProjectBudget({ projectId: project._id, cost: chargeCost }).catch(() => undefined);
+      throw err;
+    });
 
     await AiUsageLog.create({
       workspaceId: ws._id,
@@ -257,15 +271,11 @@ Keep each script under 180 words.`,
       model: out.model,
       taskType: 'variant_matrix',
       outputTokens: Math.round(drafts.reduce((s, d) => s + d.script.length, 0) / 4),
-      cost: VARIANT_COST * created.length,
+      cost: chargeCost,
       currency: project.budget.currency,
       status: 'success',
       latencyMs: 0,
     });
-
-    project.budget.spent += VARIANT_COST * created.length;
-    project.budget.remaining = Math.max(0, project.budget.remaining - VARIANT_COST * created.length);
-    await project.save();
 
     audit({
       workspaceId: ws._id.toString(),
@@ -867,6 +877,334 @@ intelligenceRouter.get(
         ? `${alerts.length} rights issue(s) need attention — the top alert is the most urgent.`
         : 'All assets have confirmed rights — no expiry risk in the next 30 days.',
       disclaimer: 'Rights checks are heuristics from recorded licence metadata, not legal advice.',
+    });
+  })
+);
+
+/* ---------------- Reviewer workload & load balancing (spec §16.3 / item 49) ---------------- */
+
+intelligenceRouter.get(
+  '/workspaces/:id/reviewer-workload',
+  requireWorkspace(),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const ws = req.workspace!;
+    const reviewerIds = ws.members
+      .filter((m) => m.status === 'active' && ['owner', 'lead', 'reviewer', 'legal_reviewer', 'finance_owner'].includes(m.role))
+      .map((m) => m.userId);
+
+    const projects = await Project.find({ workspaceId: ws._id }).select('_id title');
+    const projectIds = projects.map((p) => p._id);
+    const titleBy = new Map(projects.map((p) => [p._id.toString(), p.title]));
+
+    const [pendingTasks, reviews] = await Promise.all([
+      GenerationTask.find({
+        projectId: { $in: projectIds },
+        status: 'requires_approval',
+        reviewStatus: 'pending',
+      }).select('projectId stage taskType createdAt'),
+      import('../models/Review').then((m) =>
+        m.Review.find({ reviewerId: { $in: reviewerIds } }).select('reviewerId decision createdAt reviewedAt')
+      ),
+    ]);
+
+    const users = await import('../models/User').then((m) =>
+      m.User.find({ _id: { $in: reviewerIds } }).select('name email')
+    );
+    const nameBy = new Map(users.map((u) => [u._id.toString(), u.name]));
+
+    const rows = reviewerIds.map((id) => {
+      const key = id.toString();
+      const mine = reviews.filter((r) => r.reviewerId.toString() === key);
+      const last7d = mine.filter(
+        (r) => Date.now() - new Date(r.createdAt).getTime() < 7 * 86_400_000
+      );
+      return {
+        userId: key,
+        name: nameBy.get(key) || 'Unknown user',
+        pendingReviews: pendingTasks.length,
+        completedReviews: mine.length,
+        last7Days: last7d.length,
+        approvals: mine.filter((r) => r.decision === 'approved').length,
+        rejections: mine.filter((r) => r.decision !== 'approved').length,
+      };
+    });
+    // Pending work is workspace-wide (any approver can decide); balance suggestion = lightest load.
+    const lightest = rows.length ? rows.reduce((a, b) => (a.completedReviews <= b.completedReviews ? a : b)) : null;
+    const overloaded = rows.filter((r) => r.pendingReviews > 5);
+
+    res.json({
+      reviewers: rows,
+      pendingTotal: pendingTasks.length,
+      bottleneck: overloaded.length
+        ? `${overloaded.map((o) => o.name).join(', ')} carry more than 5 pending decisions — rebalance or add reviewers.`
+        : pendingTasks.length > 10
+          ? `${pendingTasks.length} decisions are waiting across the team — approvals are the current bottleneck.`
+          : null,
+      suggestion: lightest
+        ? `Route the next review to ${lightest.name} — currently the lightest load (${lightest.completedReviews} completed).`
+        : 'No reviewers in this workspace yet.',
+      pendingByProject: pendingTasks.slice(0, 20).map((t) => ({
+        project: titleBy.get(t.projectId.toString()) || 'Unknown project',
+        stage: t.stage || t.taskType,
+        waitingSince: t.createdAt,
+      })),
+    });
+  })
+);
+
+/* ---------------- Model Trust Score + Bargaining Agent (items 47 / 48) ---------------- */
+
+function trustScoreOf(stats: { runs: number; failures: number; avgLatencyMs: number; totalCost: number }) {
+  if (!stats.runs) return { score: 0, reason: 'No runs recorded yet.' };
+  const successRate = (stats.runs - stats.failures) / stats.runs;
+  const latencyScore = stats.avgLatencyMs ? Math.max(0, 1 - stats.avgLatencyMs / 30_000) : 0.5;
+  const costScore = stats.totalCost ? Math.max(0, 1 - stats.totalCost / stats.runs / 100) : 0.5;
+  const score = Math.round((successRate * 0.6 + latencyScore * 0.2 + costScore * 0.2) * 100);
+  return {
+    score,
+    reason:
+      score >= 75
+        ? 'Reliable: high success rate with acceptable latency and cost.'
+        : score >= 45
+          ? 'Adequate: watch failure rate and latency before routing critical tasks here.'
+          : 'Unreliable so far — prefer another model or treat outputs as drafts.',
+  };
+}
+
+intelligenceRouter.get(
+  '/workspaces/:id/model-trust',
+  requireWorkspace(),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const logs = await AiUsageLog.find({ workspaceId: req.workspace!._id });
+    const byModel = new Map<string, { runs: number; failures: number; totalLatency: number; latencyRuns: number; totalCost: number }>();
+    for (const l of logs) {
+      const key = l.model || 'unknown';
+      const cur = byModel.get(key) ?? { runs: 0, failures: 0, totalLatency: 0, latencyRuns: 0, totalCost: 0 };
+      cur.runs += 1;
+      if (l.status === 'failed') cur.failures += 1;
+      if (l.latencyMs) {
+        cur.totalLatency += l.latencyMs;
+        cur.latencyRuns += 1;
+      }
+      cur.totalCost += l.cost || 0;
+      byModel.set(key, cur);
+    }
+
+    const models = [...byModel.entries()].map(([model, s]) => {
+      const avgLatencyMs = s.latencyRuns ? Math.round(s.totalLatency / s.latencyRuns) : 0;
+      const { score, reason } = trustScoreOf({
+        runs: s.runs,
+        failures: s.failures,
+        avgLatencyMs,
+        totalCost: s.totalCost,
+      });
+      return {
+        model,
+        runs: s.runs,
+        failures: s.failures,
+        failureRate: s.runs ? Math.round((s.failures / s.runs) * 100) : 0,
+        avgLatencyMs,
+        totalCost: Math.round(s.totalCost * 100) / 100,
+        trustScore: score,
+        reason,
+      };
+    });
+    models.sort((a, b) => b.trustScore - a.trustScore);
+
+    res.json({
+      models,
+      note: 'Trust = 60% success rate + 20% latency + 20% cost-efficiency, from this workspace\'s own AI usage logs.',
+    });
+  })
+);
+
+intelligenceRouter.post(
+  '/workspaces/:id/model-bargain',
+  requireWorkspace(),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const body = validateBody(
+      z.object({
+        taskType: z.enum(['script', 'storyboard', 'verification', 'variant_matrix', 'classification']).default('script'),
+        budgetPerRun: z.number().min(0).optional(),
+      }),
+      req.body ?? {}
+    );
+
+    const logs = await AiUsageLog.find({ workspaceId: req.workspace!._id, taskType: body.taskType });
+    const stats = new Map<string, { runs: number; failures: number; totalLatency: number; latencyRuns: number; totalCost: number }>();
+    for (const l of logs) {
+      const key = l.model || 'unknown';
+      const cur = stats.get(key) ?? { runs: 0, failures: 0, totalLatency: 0, latencyRuns: 0, totalCost: 0 };
+      cur.runs += 1;
+      if (l.status === 'failed') cur.failures += 1;
+      if (l.latencyMs) {
+        cur.totalLatency += l.latencyMs;
+        cur.latencyRuns += 1;
+      }
+      cur.totalCost += l.cost || 0;
+      stats.set(key, cur);
+    }
+
+    const options = [...stats.entries()].map(([model, s]) => {
+      const avgLatencyMs = s.latencyRuns ? Math.round(s.totalLatency / s.latencyRuns) : 0;
+      const avgCost = s.runs ? s.totalCost / s.runs : 0;
+      const { score } = trustScoreOf({ runs: s.runs, failures: s.failures, avgLatencyMs, totalCost: s.totalCost });
+      const withinBudget = body.budgetPerRun === undefined || avgCost <= body.budgetPerRun;
+      return { model, avgCost: Math.round(avgCost * 100) / 100, avgLatencyMs, trustScore: score, withinBudget, runs: s.runs };
+    });
+
+    const eligible = options.filter((o) => o.withinBudget);
+    const pool = eligible.length ? eligible : options;
+    // Quality-first by default; tie-break on cost — this is the Bargaining Agent's rule.
+    const best = pool.length ? pool.reduce((a, b) => (b.trustScore > a.trustScore || (b.trustScore === a.trustScore && b.avgCost < a.avgCost) ? b : a)) : null;
+
+    res.json({
+      taskType: body.taskType,
+      options: options.sort((a, b) => b.trustScore - a.trustScore),
+      recommendation: best
+        ? `Route ${body.taskType} to ${best.model} — trust ${best.trustScore}/100 at ~${best.avgCost} per run${body.budgetPerRun !== undefined && !best.withinBudget ? ' (no model is within budget; consider raising it or using the rule engine)' : ''}.`
+        : `No ${body.taskType} runs recorded yet — the default provider will be used until usage data exists.`,
+      ruleEngineFallback: 'readyforge-rules (always available at zero cost)',
+    });
+  })
+);
+
+/* ---------------- Decision Debt Tracker / Replay / Failure Patterns (items 44–46) ---------------- */
+
+intelligenceRouter.get(
+  '/workspaces/:id/decision-debt',
+  requireWorkspace(),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const ws = req.workspace!;
+    const projects = await Project.find({ workspaceId: ws._id, status: { $nin: ['archived', 'published'] } }).select(
+      '_id title'
+    );
+    const projectIds = projects.map((p) => p._id);
+    const titleBy = new Map(projects.map((p) => [p._id.toString(), p.title]));
+    const now = Date.now();
+
+    const [openConflicts, pendingContracts, pendingTasks] = await Promise.all([
+      Conflict.find({ projectId: { $in: projectIds }, status: { $in: ['open', 'awaiting_decision'] } }),
+      ProductionContract.find({ projectId: { $in: projectIds }, status: 'pending_approval' }),
+      GenerationTask.find({ projectId: { $in: projectIds }, status: 'requires_approval', reviewStatus: 'pending' }),
+    ]);
+
+    const items = [
+      ...openConflicts.map((c) => ({
+        kind: 'conflict' as const,
+        project: titleBy.get(c.projectId.toString()) || 'Unknown project',
+        title: c.title,
+        severity: c.severity,
+        ageDays: Math.floor((now - new Date(c.createdAt).getTime()) / 86_400_000),
+        impact: c.impactIfUnresolved || 'Decision quality degrades the longer this waits.',
+      })),
+      ...pendingContracts.map((c) => ({
+        kind: 'contract' as const,
+        project: titleBy.get(c.projectId.toString()) || 'Unknown project',
+        title: `Contract v${c.version} awaiting approval`,
+        severity: 'high' as const,
+        ageDays: Math.floor((now - new Date(c.createdAt).getTime()) / 86_400_000),
+        impact: 'Generation stays blocked until this contract is approved.',
+      })),
+      ...pendingTasks.map((t) => ({
+        kind: 'review' as const,
+        project: titleBy.get(t.projectId.toString()) || 'Unknown project',
+        title: `${t.stage || t.taskType} output awaiting review`,
+        severity: 'medium' as const,
+        ageDays: Math.floor((now - new Date(t.createdAt).getTime()) / 86_400_000),
+        impact: 'The draft ladder cannot advance without a decision.',
+      })),
+    ].sort((a, b) => b.ageDays - a.ageDays);
+
+    const totalAge = items.reduce((s, i) => s + i.ageDays, 0);
+    res.json({
+      items,
+      openCount: items.length,
+      totalDecisionDays: totalAge,
+      summary: items.length
+        ? `${items.length} decision(s) pending, ageing ${totalAge} day(s) in total — the oldest is the most expensive to keep ignoring.`
+        : 'No pending decisions — decision debt is zero.',
+    });
+  })
+);
+
+intelligenceRouter.get(
+  '/workspaces/:id/decision-replay',
+  requireWorkspace(),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const { AuditLog } = await import('../models/AuditLog');
+    const decisionPattern = /(resolve|dismiss|approve|reject|review|override|lock|decide|assign|variant)/i;
+    const logs = await AuditLog.find({
+      workspaceId: req.workspace!._id,
+      action: { $regex: decisionPattern.source, $options: 'i' },
+    })
+      .sort('-createdAt')
+      .limit(100);
+    const users = await import('../models/User').then((m) =>
+      m.User.find({ _id: { $in: logs.map((l) => l.actorId) } }).select('name')
+    );
+    const nameBy = new Map(users.map((u) => [u._id.toString(), u.name]));
+
+    res.json({
+      timeline: logs.map((l) => ({
+        id: l._id.toString(),
+        at: l.createdAt,
+        actor: nameBy.get(String(l.actorId)) || l.actorType || 'system',
+        action: l.action,
+        entityType: l.entityType,
+        before: l.before ?? null,
+        after: l.after ?? null,
+      })),
+      note: 'Reconstructed from the immutable audit trail — every decision shows what changed and who changed it.',
+    });
+  })
+);
+
+intelligenceRouter.get(
+  '/workspaces/:id/failure-patterns',
+  requireWorkspace(),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const projects = await Project.find({ workspaceId: req.workspace!._id }).select('_id');
+    const projectIds = projects.map((p) => p._id);
+
+    const [rejected, failedReports, failedTasks] = await Promise.all([
+      import('../models/Review').then((m) =>
+        m.Review.find({
+          projectId: { $in: projectIds },
+          decision: { $in: ['rejected', 'changes_requested'] },
+        })
+      ),
+      import('../models/VerificationReport').then((m) =>
+        m.VerificationReport.find({ projectId: { $in: projectIds }, status: 'failed' }).select('checks.status checks.message')
+      ),
+      GenerationTask.find({ projectId: { $in: projectIds }, status: 'failed' }).select('error taskType'),
+    ]);
+
+    const tally = new Map<string, number>();
+    const bump = (key: string | undefined, n = 1) => {
+      if (!key) return;
+      const k = key.trim().slice(0, 160);
+      tally.set(k, (tally.get(k) ?? 0) + n);
+    };
+    for (const r of rejected) bump(r.rootCause || `Rejected ${r.decision}`);
+    for (const rep of failedReports) for (const c of rep.checks ?? []) if (c.status === 'failed') bump(c.message);
+    for (const t of failedTasks) bump(t.error || `Generation failed (${t.taskType})`);
+
+    const patterns = [...tally.entries()]
+      .map(([cause, count]) => ({ cause, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 15);
+    const repeat = patterns.filter((p) => p.count >= 3);
+
+    res.json({
+      patterns,
+      totalIncidents: patterns.reduce((s, p) => s + p.count, 0),
+      repeatedMistakes: repeat,
+      recommendation: repeat.length
+        ? `"${repeat[0].cause}" has happened ${repeat[0].count} times — add a guideline or checklist entry to prevent it structurally.`
+        : patterns.length
+          ? `Most common failure: "${patterns[0].cause}" (${patterns[0].count}×). Address it first.`
+          : 'No recorded failures yet.',
     });
   })
 );

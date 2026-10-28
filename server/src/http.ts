@@ -37,6 +37,11 @@ export function errorHandler(err: unknown, _req: any, res: Response, _next: any)
   if (e?.name === 'CastError') {
     return res.status(400).json({ error: 'Invalid id format.' });
   }
+  // Optimistic-concurrency conflict (Workspace uses `optimisticConcurrency`):
+  // another writer won the race — safe to tell the client to retry.
+  if (e?.name === 'VersionError') {
+    return res.status(409).json({ error: 'Record was modified concurrently — please retry.' });
+  }
   // Multer upload errors: oversize → 413, anything else → 400. Never a 500.
   if (e?.name === 'MulterError') {
     const tooLarge = e.code === 'LIMIT_FILE_SIZE';

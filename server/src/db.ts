@@ -17,6 +17,12 @@ export async function connectDb(): Promise<void> {
     });
     uri = memoryServer.getUri('readyforge');
     console.log(`[db] MONGODB_URI not set — using local MongoDB at ${dbPath}`);
+    if (config.isProd) {
+      console.warn(
+        '[db] WARNING: running in production without MONGODB_URI — data lives in a local '
+          + 'fallback store and will not survive a redeploy. Set MONGODB_URI for production.'
+      );
+    }
   }
 
   await mongoose.connect(uri);

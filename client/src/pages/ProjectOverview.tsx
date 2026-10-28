@@ -72,6 +72,21 @@ export default function ProjectOverview() {
     onError: (err) => toast.error(err.message),
   });
 
+  // Hooks must run before the early returns below — the button that calls this
+  // only renders when `project` exists, so the null assertions are call-time safe.
+  const saveTemplate = useMutation({
+    mutationFn: () =>
+      api.post(`/api/workspaces/${project!.workspaceId}/templates`, {
+        name: project!.title,
+        description: `Saved from “${project!.title}”`,
+        projectType: project!.projectType,
+        mode: project!.mode,
+        sourceProjectId: project!.id,
+      }),
+    onSuccess: () => toast.success('Saved as a workspace template — pick it in New project'),
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   if (isLoading) return <Loading />;
   if (error) return <ErrorBox error={error} />;
   if (!project) return null;
@@ -110,9 +125,14 @@ export default function ProjectOverview() {
               </div>
               <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">{project.description || 'No description.'}</p>
             </div>
-            <Button variant="outline" size="sm" onClick={openEdit}>
-              <Pencil className="h-3.5 w-3.5" /> Edit
-            </Button>
+            <div className="flex shrink-0 gap-2">
+              <Button variant="outline" size="sm" loading={saveTemplate.isPending} onClick={() => saveTemplate.mutate()} title="Save this project's brief as a reusable template">
+                Save as template
+              </Button>
+              <Button variant="outline" size="sm" onClick={openEdit}>
+                <Pencil className="h-3.5 w-3.5" /> Edit
+              </Button>
+            </div>
           </div>
 
           <dl className="mt-4 grid gap-4 sm:grid-cols-2">

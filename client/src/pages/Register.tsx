@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -22,6 +22,7 @@ type FormValues = z.infer<typeof schema>;
 
 export default function Register() {
   const navigate = useNavigate();
+  const location = useLocation();
   const applySession = useAuthStore((s) => s.applySession);
   const [serverError, setServerError] = useState<string | null>(null);
   const { register, handleSubmit, formState } = useForm<FormValues>({ resolver: zodResolver(schema) });
@@ -35,7 +36,9 @@ export default function Register() {
       );
       await applySession(data.accessToken, data.user);
       toast.success('Account created — welcome to ReadyForge');
-      navigate('/app', { replace: true });
+      // Preserve invite/reset context passed through location.state (spec §6.2).
+      const from = (location.state as { from?: string } | null)?.from;
+      navigate(from && from !== '/register' ? from : '/app', { replace: true });
     } catch (err) {
       setServerError(err instanceof Error ? err.message : 'Registration failed');
     }

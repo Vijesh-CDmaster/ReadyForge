@@ -7,6 +7,9 @@ export interface SessionUser {
   email: string;
   avatarUrl: string;
   platformRole: 'user' | 'admin';
+  isVerified?: boolean;
+  language?: string;
+  timezone?: string;
 }
 
 export interface WorkspaceSummary {

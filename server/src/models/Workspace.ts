@@ -9,6 +9,7 @@ export const WORKSPACE_ROLES = [
   'reviewer',
   'legal_reviewer',
   'finance_owner',
+  'marketing_strategist',
   'viewer',
 ] as const;
 export type WorkspaceRole = (typeof WORKSPACE_ROLES)[number];
@@ -38,6 +39,14 @@ export interface IWorkspace {
   members: IWorkspaceMember[];
   brandProfileId?: Types.ObjectId;
   brandDna?: IBrandDna;
+  /** Set when the workspace is archived; null/undefined = active. */
+  archivedAt?: Date | null;
+  /** One at most: owner offers, recipient must accept (spec §6.2 ownership transfer). */
+  pendingOwnershipTransfer?: {
+    toUserId: Types.ObjectId;
+    initiatedBy: Types.ObjectId;
+    expiresAt: Date;
+  } | null;
   settings: {
     defaultCurrency: string;
     aiProviders: string[];
@@ -75,8 +84,22 @@ const workspaceSchema = new Schema<IWorkspace>(
       aiProviders: { type: [String], default: ['openai-compatible'] },
       budgetApprovalThreshold: { type: Number, default: 1000 },
     },
+    archivedAt: { type: Date, default: null },
+    pendingOwnershipTransfer: {
+      type: new Schema(
+        {
+          toUserId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+          initiatedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+          expiresAt: { type: Date, required: true },
+        },
+        { _id: false }
+      ),
+      default: null,
+    },
   },
-  { timestamps: true }
+  // Optimistic concurrency: concurrent writers (e.g. competing ownership
+  // transfers) fail with VersionError instead of silently overwriting.
+  { timestamps: true, optimisticConcurrency: true }
 );
 
 export const Workspace = model<IWorkspace>('Workspace', workspaceSchema);

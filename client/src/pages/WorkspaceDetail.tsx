@@ -18,6 +18,7 @@ import {
   Tabs,
 } from '../components/ui';
 import { StatusBadge, ReadinessMeter } from '../components/widgets';
+import { PendingInvitations, OwnershipTransferCard } from '../components/InvitationsPanel';
 import { toast } from '../store/toast';
 
 interface Member {
@@ -56,6 +57,7 @@ const ROLE_OPTIONS = [
   ['reviewer', 'Reviewer — approvals'],
   ['legal_reviewer', 'Legal reviewer — claims & rights'],
   ['finance_owner', 'Finance owner — budget decisions'],
+  ['marketing_strategist', 'Marketing strategist — audience & campaign direction'],
   ['viewer', 'Viewer — read only'],
 ] as const;
 
@@ -66,6 +68,7 @@ export default function WorkspaceDetail() {
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState('writer');
+  const [inviteResult, setInviteResult] = useState<{ inviteUrl?: string; delivery?: { delivered: boolean; note?: string } } | null>(null);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['workspace', workspaceId],
@@ -75,12 +78,20 @@ export default function WorkspaceDetail() {
 
   const invite = useMutation({
     mutationFn: (vars: { email: string; role: string }) =>
-      api.post(`/api/workspaces/${workspaceId}/members/invite`, vars),
-    onSuccess: () => {
-      toast.success('Member added');
-      setInviteOpen(false);
+      api.post<{ inviteUrl?: string; delivery?: { delivered: boolean; note?: string } }>(
+        `/api/workspaces/${workspaceId}/invitations`,
+        vars
+      ),
+    onSuccess: (res) => {
+      setInviteResult(res);
+      if (res.inviteUrl) {
+        void navigator.clipboard?.writeText(res.inviteUrl).catch(() => undefined);
+        toast.success('Invitation created — link copied (no email provider configured)');
+      } else {
+        toast.success('Invitation created');
+      }
       setInviteEmail('');
-      void queryClient.invalidateQueries({ queryKey: ['workspace', workspaceId] });
+      void queryClient.invalidateQueries({ queryKey: ['invitations', workspaceId] });
     },
     onError: (err) => toast.error(err.message),
   });
@@ -225,10 +236,12 @@ export default function WorkspaceDetail() {
             </div>
           ))}
           <div className="px-4 py-3 text-xs text-slate-500">
-            Invited users must already have a ReadyForge account.
+            Invitations expire after 7 days, can be resent (which rotates the link) and revoked at any time.
           </div>
         </Card>
       )}
+
+      {tab === 'members' && isOwner && <PendingInvitations workspaceId={workspaceId} />}
 
       {tab === 'settings' && (
         <Card className="p-6">
@@ -245,6 +258,15 @@ export default function WorkspaceDetail() {
         </Card>
       )}
 
+      {tab === 'settings' && (
+        <OwnershipTransferCard
+          workspaceId={workspaceId}
+          members={data.members}
+          ownerId={data.ownerId}
+          isOwner={isOwner}
+        />
+      )}
+
       <Modal
         open={inviteOpen}
         onClose={() => setInviteOpen(false)}
@@ -254,15 +276,32 @@ export default function WorkspaceDetail() {
             <Button variant="ghost" onClick={() => setInviteOpen(false)}>
               Cancel
             </Button>
-            <Button loading={invite.isPending} onClick={() => invite.mutate({ email: inviteEmail, role: inviteRole })}>
-              Add member
+            <Button loading={invite.isPending} onClick={() => { setInviteResult(null); invite.mutate({ email: inviteEmail, role: inviteRole }); }}>
+              Create invitation
             </Button>
           </>
         }
       >
         <p className="mb-4 flex items-center gap-2 text-sm text-slate-500">
-          <Mail className="h-4 w-4" /> The user must already be registered (no email delivery in this build).
+          <Mail className="h-4 w-4" /> {inviteResult?.delivery?.note || 'Sends an expiring invitation link — the recipient accepts or declines it.'}
         </p>
+        {inviteResult?.inviteUrl && (
+          <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs dark:border-slate-700 dark:bg-slate-900">
+            <p className="mb-1 font-medium">Invitation link (development fallback — not emailed)</p>
+            <code className="block break-all text-brand-600">{inviteResult.inviteUrl}</code>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-2"
+              onClick={() => {
+                void navigator.clipboard?.writeText(inviteResult.inviteUrl!).catch(() => undefined);
+                toast.success('Link copied');
+              }}
+            >
+              Copy link
+            </Button>
+          </div>
+        )}
         <Field label="Email">
           <Input id="invite-email" placeholder="lead@readyforge.ai" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} />
         </Field>

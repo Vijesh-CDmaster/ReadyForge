@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import type { HydratedDocument } from 'mongoose';
 import { ApiError, asyncHandler, validateBody } from '../http';
 import { audit, clientIp } from '../audit';
 import { AuthedRequest, requireAuth, requireProject } from '../middleware/auth';
@@ -14,7 +15,7 @@ import { IConflict, Conflict } from '../models/Conflict';
 import { IAsset, Asset } from '../models/Asset';
 import { Notification } from '../models/Notification';
 import { ProjectMember } from '../models/ProjectMember';
-import { User } from '../models/User';
+import { User, wantsNotification } from '../models/User';
 import { computeReadiness } from '../engines/readiness';
 import {
   STAGE_COST,
@@ -28,6 +29,7 @@ import {
 import { verifyOutput } from '../ai/verify';
 import { loadTasteDirection } from '../ai/taste';
 import { TasteProfile } from '../models/TasteProfile';
+import { chargeProjectBudget, refundProjectBudget } from '../services/budget';
 
 export const generationRouter = Router();
 generationRouter.use(requireAuth);
@@ -186,8 +188,15 @@ async function notifyApprovers(
       ['owner', 'lead', 'reviewer'].includes(m.role) &&
       m.userId.toString() !== actorId
   );
+  // Respect each recipient's notification preferences (spec §22.1).
+  const targetUsers = await User.find({ _id: { $in: targets.map((m) => m.userId) } });
+  const allowed = targets.filter((m) => {
+    const u = targetUsers.find((t) => t._id.toString() === m.userId.toString());
+    return wantsNotification(u, notification.type);
+  });
+  if (!allowed.length) return;
   await Notification.insertMany(
-    targets.map((m) => ({
+    allowed.map((m) => ({
       userId: m.userId,
       workspaceId,
       projectId: project._id,
@@ -262,24 +271,33 @@ generationRouter.post(
     const attempt = tasks.filter((t) => t.stage === body.stage).length + 1;
     const cost = STAGE_COST[body.stage] || 0;
 
-    const task = await GenerationTask.create({
+    // Atomic budget reservation: this conditional update is the authoritative hard-limit
+    // check — the ladder blocker above is only advisory under concurrent requests.
+    await chargeProjectBudget({
       projectId: project._id,
-      contractId: contract._id,
-      createdById: user._id,
-      taskType: STAGE_TASK[body.stage],
-      stage: body.stage,
-      status: 'running',
-      attempt,
-      inputPrompt: `Generate ${stage.label} for "${project.title}"`,
-      estimatedCost: cost,
-      startedAt: new Date(),
-      regenerationNotes: body.notes,
+      cost,
+      what: `Generating ${stage.label}`,
     });
 
+    let task: HydratedDocument<IGenerationTask> | null = null;
     const started = Date.now();
-    // Creative Taste DNA shapes expression; the approved contract always wins conflicts.
-    const tasteDirection = (await loadTasteDirection(user._id, project._id)) ?? undefined;
     try {
+      task = await GenerationTask.create({
+        projectId: project._id,
+        contractId: contract._id,
+        createdById: user._id,
+        taskType: STAGE_TASK[body.stage],
+        stage: body.stage,
+        status: 'running',
+        attempt,
+        inputPrompt: `Generate ${stage.label} for "${project.title}"`,
+        estimatedCost: cost,
+        startedAt: new Date(),
+        regenerationNotes: body.notes,
+      });
+
+      // Creative Taste DNA shapes expression; the approved contract always wins conflicts.
+      const tasteDirection = (await loadTasteDirection(user._id, project._id)) ?? undefined;
       let outputText = '';
       let source: 'ai' | 'rule_engine' = 'rule_engine';
       let model = 'readyforge-rules';
@@ -333,11 +351,8 @@ generationRouter.post(
       await task.save();
       await contract.save();
 
-      project.budget.spent += cost;
-      project.budget.remaining =
-        project.budget.amount > 0
-          ? Math.max(0, project.budget.amount - project.budget.spent)
-          : Math.max(0, project.budget.remaining - cost);
+      // Budget was already charged atomically above; only `status` is dirty in memory,
+      // so this save cannot overwrite the atomic budget counters.
       project.status = 'review';
       await project.save();
 
@@ -377,22 +392,26 @@ generationRouter.post(
 
       res.status(201).json({ task: serializeTask(task as never), contract: { status: contract.status } });
     } catch (err) {
-      task.status = 'failed';
-      task.error = (err as Error).message;
-      task.completedAt = new Date();
-      await task.save();
-      await AiUsageLog.create({
-        workspaceId: ws._id,
-        projectId: project._id,
-        userId: user._id,
-        model: task.modelName,
-        taskType: task.taskType,
-        cost: 0,
-        currency: project.budget.currency,
-        status: 'failed',
-        latencyMs: Date.now() - started,
-      }).catch(() => undefined);
-      throw new ApiError(500, `Generation failed: ${(err as Error).message}`);
+      // A failed run must not consume budget — release the reservation first.
+      await refundProjectBudget({ projectId: project._id, cost }).catch(() => undefined);
+      if (task) {
+        task.status = 'failed';
+        task.error = (err as Error).message;
+        task.completedAt = new Date();
+        await task.save();
+        await AiUsageLog.create({
+          workspaceId: ws._id,
+          projectId: project._id,
+          userId: user._id,
+          model: task.modelName,
+          taskType: task.taskType,
+          cost: 0,
+          currency: project.budget.currency,
+          status: 'failed',
+          latencyMs: Date.now() - started,
+        }).catch(() => undefined);
+      }
+      throw err instanceof ApiError ? err : new ApiError(500, `Generation failed: ${(err as Error).message}`);
     }
   })
 );
@@ -522,18 +541,22 @@ generationRouter.post(
       }
     }
 
-    await Notification.create({
-      userId: task.createdById,
-      workspaceId: ws._id,
-      projectId: project._id,
-      type: body.decision === 'approved' ? 'generation_complete' : 'approval_required',
-      title:
-        body.decision === 'approved'
-          ? `${STAGE_LABEL[task.stage || task.taskType]} approved — ${project.title}`
-          : `Changes requested on ${STAGE_LABEL[task.stage || task.taskType]} — ${project.title}`,
-      message: body.comment || 'Reviewed by ' + user.name,
-      link: `/app/projects/${project._id.toString()}/ladder`,
-    });
+    const notifyType = body.decision === 'approved' ? 'generation_complete' : 'approval_required';
+    const author = await User.findById(task.createdById);
+    if (wantsNotification(author, notifyType)) {
+      await Notification.create({
+        userId: task.createdById,
+        workspaceId: ws._id,
+        projectId: project._id,
+        type: notifyType,
+        title:
+          body.decision === 'approved'
+            ? `${STAGE_LABEL[task.stage || task.taskType]} approved — ${project.title}`
+            : `Changes requested on ${STAGE_LABEL[task.stage || task.taskType]} — ${project.title}`,
+        message: body.comment || 'Reviewed by ' + user.name,
+        link: `/app/projects/${project._id.toString()}/ladder`,
+      });
+    }
 
     audit({
       workspaceId: ws._id.toString(),

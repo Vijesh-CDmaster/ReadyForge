@@ -8,6 +8,9 @@ import { Conflict } from '../models/Conflict';
 import { Asset } from '../models/Asset';
 import { ProductionContract } from '../models/ProductionContract';
 import { AuditLog } from '../models/AuditLog';
+import { ProjectTemplate } from '../models/ProjectTemplate';
+import { BUILTIN_TEMPLATES } from '../templates/builtin';
+import { isValidObjectId } from 'mongoose';
 import { requireAuth, requireProject, requireRole, AuthedRequest } from '../middleware/auth';
 import { asyncHandler, validateBody, ApiError } from '../http';
 import { audit, clientIp } from '../audit';
@@ -36,6 +39,7 @@ const createSchema = z.object({
   successMetric: z.string().max(400).optional(),
   deadline: z.string().datetime().optional(),
   budget: budgetSchema.optional(),
+  templateId: z.string().min(1).optional(),
 });
 
 const updateSchema = createSchema.partial().omit({ workspaceId: true }).extend({ status: z.string().optional() });
@@ -63,6 +67,29 @@ projectsRouter.post(
       throw new ApiError(403, 'Your workspace role cannot create projects');
     }
 
+    // Optional template: a workspace custom template (explicitly selected) or a
+    // built-in one. The request's own brief values win; the template only fills
+    // what the caller left empty, so the API contract is unchanged for old clients.
+    let templateBrief: Record<string, unknown> | undefined;
+    if (body.templateId) {
+      const builtin = BUILTIN_TEMPLATES.find((b) => b.id === body.templateId);
+      if (builtin) {
+        templateBrief = builtin.brief as unknown as Record<string, unknown>;
+      } else {
+        // Custom templates are workspace-scoped — a foreign id 404s (no existence leak).
+        if (!isValidObjectId(body.templateId)) throw new ApiError(404, 'Template not found');
+        const tpl = await ProjectTemplate.findOne({
+          _id: body.templateId,
+          workspaceId: workspace._id,
+        });
+        if (!tpl) throw new ApiError(404, 'Template not found');
+        templateBrief = tpl.brief as unknown as Record<string, unknown>;
+      }
+    }
+
+    const pick = <T>(v: T | undefined, k: string): T | undefined =>
+      v !== undefined && v !== null && v !== '' ? v : ((templateBrief?.[k] as T | undefined) ?? undefined);
+
     const budgetAmount = body.budget?.amount ?? 0;
     const project = await Project.create({
       workspaceId: workspace._id,
@@ -72,11 +99,11 @@ projectsRouter.post(
       projectType: body.projectType,
       mode: body.mode,
       status: 'collecting_inputs',
-      objective: body.objective,
-      audience: body.audience,
-      tone: body.tone,
-      callToAction: body.callToAction,
-      successMetric: body.successMetric,
+      objective: pick(body.objective, 'objective'),
+      audience: pick(body.audience, 'audience'),
+      tone: pick(body.tone, 'tone'),
+      callToAction: pick(body.callToAction, 'callToAction'),
+      successMetric: pick(body.successMetric, 'successMetric'),
       deadline: body.deadline ? new Date(body.deadline) : undefined,
       budget: {
         amount: budgetAmount,
@@ -106,7 +133,29 @@ projectsRouter.post(
       ipAddress: clientIp(req),
     });
 
-    res.status(201).json({ project });
+    // Serialized consistently with GET /projects/:id so clients can read `id`
+    // (raw mongoose toJSON only exposes `_id`, which broke post-create routing).
+    res.status(201).json({
+      project: {
+        id: project._id.toString(),
+        workspaceId: project.workspaceId.toString(),
+        title: project.title,
+        description: project.description,
+        projectType: project.projectType,
+        status: project.status,
+        mode: project.mode,
+        objective: project.objective,
+        audience: project.audience,
+        tone: project.tone,
+        callToAction: project.callToAction,
+        successMetric: project.successMetric,
+        deadline: project.deadline,
+        budget: project.budget,
+        currentStage: project.currentStage,
+        readinessScore: project.readinessScore,
+        createdAt: project.createdAt,
+      },
+    });
   })
 );
 
@@ -236,10 +285,28 @@ projectsRouter.patch(
     if (body.budget) {
       project.budget.amount = body.budget.amount;
       if (body.budget.currency) project.budget.currency = body.budget.currency;
-      project.budget.remaining = Math.max(0, body.budget.amount - project.budget.spent);
     }
 
+    // Only amount/currency are dirty here — `remaining` is left to the atomic
+    // recompute below so a concurrent generation charge cannot be overwritten
+    // by this request's stale read of `spent`.
     await project.save();
+    if (body.budget) {
+      const fresh = await Project.findOneAndUpdate(
+        { _id: project._id },
+        [
+          {
+            $set: {
+              'budget.remaining': { $max: [0, { $subtract: ['$budget.amount', '$budget.spent'] }] },
+              updatedAt: new Date(),
+            },
+          },
+        ],
+        { new: true }
+      ).select('budget');
+      if (fresh) project.budget = fresh.budget;
+    }
+
     audit({
       workspaceId: project.workspaceId.toString(),
       projectId: project._id.toString(),
@@ -518,6 +585,58 @@ projectsRouter.get(
       };
     }
     res.json({ contract: payload, history });
+  })
+);
+
+/* Contract version diff (spec §12.4) — field-level comparison of two versions. */
+function flattenContract(obj: unknown, prefix = '', out: Record<string, string> = {}, depth = 0): Record<string, string> {
+  if (depth > 4 || obj === null || obj === undefined) return out;
+  if (Array.isArray(obj)) {
+    out[prefix || 'value'] = obj.map((v) => (typeof v === 'object' ? JSON.stringify(v) : String(v))).join(' | ');
+    return out;
+  }
+  if (typeof obj !== 'object') {
+    out[prefix || 'value'] = String(obj);
+    return out;
+  }
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    if (['_id', '__v', 'createdAt', 'updatedAt', 'projectId', 'workspaceId', 'createdById'].includes(k)) continue;
+    flattenContract(v, prefix ? `${prefix}.${k}` : k, out, depth + 1);
+  }
+  return out;
+}
+
+projectsRouter.get(
+  '/:id/contract/diff',
+  requireProject(),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const from = Number(req.query.from);
+    const to = Number(req.query.to);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) {
+      throw new ApiError(400, 'Query params ?from=<version>&to=<version> are required');
+    }
+    const [a, b] = await Promise.all([
+      ProductionContract.findOne({ projectId: req.project!._id, version: from }),
+      ProductionContract.findOne({ projectId: req.project!._id, version: to }),
+    ]);
+    if (!a || !b) throw new ApiError(404, 'One of those contract versions does not exist');
+
+    const fa = flattenContract(a.toObject());
+    const fb = flattenContract(b.toObject());
+    const keys = [...new Set([...Object.keys(fa), ...Object.keys(fb)])].sort();
+    const changes = keys
+      .filter((k) => (fa[k] ?? '') !== (fb[k] ?? ''))
+      .map((k) => ({ field: k, from: fa[k] ?? '—', to: fb[k] ?? '—' }));
+
+    res.json({
+      from: { version: from, status: a.status, createdAt: a.createdAt },
+      to: { version: to, status: b.status, createdAt: b.createdAt },
+      changes,
+      summary:
+        changes.length === 0
+          ? `Versions ${from} and ${to} are identical.`
+          : `${changes.length} field(s) changed between versions ${from} and ${to}.`,
+    });
   })
 );
 
