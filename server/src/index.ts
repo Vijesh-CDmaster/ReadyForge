@@ -2,7 +2,6 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
-import path from 'node:path';
 import { config } from './config';
 import { connectDb } from './db';
 import { errorHandler } from './http';
@@ -22,6 +21,7 @@ import { intelligenceRouter } from './routes/intelligence';
 import { tasteRouter } from './routes/taste';
 import { commentsRouter } from './routes/comments';
 import { adminRouter } from './routes/admin';
+import { VideoJobWorker } from './services/videoJobs';
 
 export function createApp() {
   const app = express();
@@ -36,8 +36,6 @@ export function createApp() {
   );
   app.use(express.json({ limit: '2mb' }));
   app.use(cookieParser());
-
-  app.use('/uploads', express.static(path.resolve(config.upload.dir), { maxAge: '7d' }));
 
   app.get('/api/health', (_req, res) =>
     res.json({ ok: true, service: 'readyforge-api', ai: Boolean(config.ai.apiKey), time: new Date().toISOString() })
@@ -112,10 +110,17 @@ async function main() {
   }
 
   const app = createApp();
-  app.listen(config.port, () => {
+  const worker = new VideoJobWorker();
+  worker.start();
+  const server = app.listen(config.port, () => {
     console.log(`[api] ReadyForge API on http://localhost:${config.port}`);
     console.log(`[ai]  provider: ${config.ai.apiKey ? `${config.ai.baseUrl} (${config.ai.model})` : 'rule engine (set OPENAI_API_KEY to enable LLM calls)'}`);
   });
+  const shutdown = () => {
+    void worker.stop().finally(() => server.close());
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
 }
 
 if (require.main === module) {

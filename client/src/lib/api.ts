@@ -32,12 +32,13 @@ async function tryRefresh(): Promise<boolean> {
   }
 }
 
-async function request<T>(path: string, opts: { method?: Method; body?: unknown; retry?: boolean } = {}): Promise<T> {
+async function request<T>(path: string, opts: { method?: Method; body?: unknown; retry?: boolean; extraHeaders?: Record<string, string> } = {}): Promise<T> {
   const method = opts.method || 'GET';
   const isForm = typeof FormData !== 'undefined' && opts.body instanceof FormData;
   const headers: Record<string, string> = {};
   const token = getStoredToken();
   if (token) headers.Authorization = `Bearer ${token}`;
+  Object.assign(headers, opts.extraHeaders);
   if (opts.body !== undefined && !isForm) headers['Content-Type'] = 'application/json';
 
   // Guard against hung requests leaving the UI in an eternal loading state.
@@ -85,10 +86,39 @@ async function request<T>(path: string, opts: { method?: Method; body?: unknown;
   return (await res.json()) as T;
 }
 
+async function requestBlob(path: string, retry = true): Promise<Blob> {
+  const headers: Record<string, string> = {};
+  const token = getStoredToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(path, { headers, credentials: 'include' });
+
+  if (res.status === 401 && retry) {
+    const refreshed = await tryRefresh();
+    if (refreshed) return requestBlob(path, false);
+    setAccessToken(null);
+    onUnauthorized?.();
+    throw new Error('Session expired — please sign in again.');
+  }
+  if (!res.ok) {
+    let message = `Request failed (${res.status})`;
+    try {
+      const data = (await res.json()) as { error?: string };
+      if (data?.error) message = data.error;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new Error(message);
+  }
+  return res.blob();
+}
+
 export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) => request<T>(path, { method: 'POST', body }),
+  postWithHeaders: <T>(path: string, body: unknown, extraHeaders: Record<string, string>) =>
+    request<T>(path, { method: 'POST', body, extraHeaders }),
   put: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PUT', body }),
   patch: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PATCH', body }),
   del: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
+  getBlob: (path: string) => requestBlob(path),
 };

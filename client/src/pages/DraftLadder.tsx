@@ -125,11 +125,32 @@ export default function DraftLadder() {
     enabled: Boolean(projectId),
   });
 
+  const { data: videoJobs } = useQuery({
+    queryKey: ['video-jobs', projectId],
+    queryFn: () =>
+      api.get<{ jobs: Array<{ id: string; status: string; progress: number; currentStage: string; errorMessage: string | null; mockOutput: boolean }> }>(
+        `/api/projects/${projectId}/video-jobs`
+      ),
+    enabled: Boolean(projectId),
+    refetchInterval: (query) =>
+      query.state.data?.jobs.some((job) => job.status === 'queued' || job.status === 'running') ? 1000 : false,
+  });
+
   const [reviewTask, setReviewTask] = useState<LadderTask | null>(null);
   const [comment, setComment] = useState('');
   const [regenStage, setRegenStage] = useState<StageState | null>(null);
   const [notes, setNotes] = useState('');
   const [viewTask, setViewTask] = useState<LadderTask | null>(null);
+  const mockVideo = useMutation({
+    mutationFn: () =>
+      api.postWithHeaders<{ job: { id: string } }>(
+        `/api/projects/${projectId}/video-jobs`,
+        { stage: 'final', mode: 'success' },
+        { 'Idempotency-Key': `mock-video-${projectId}-${Date.now()}` }
+      ),
+    onSuccess: () => toast.success('Mock video job queued — output will be clearly labelled'),
+    onError: (err: Error) => toast.error(err.message),
+  });
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['ladder', projectId] });
@@ -247,6 +268,26 @@ export default function DraftLadder() {
               <li key={b}>{b}</li>
             ))}
           </ul>
+        </Card>
+      )}
+
+      {contract && (contract.status === 'approved' || contract.status === 'locked') && (
+        <Card className="border-brand-200 bg-brand-50/40 dark:border-brand-500/25 dark:bg-brand-500/5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold">Asynchronous mock video</p>
+              <p className="mt-1 text-xs text-slate-500">Test-only output; not a playable MP4 or approved production result.</p>
+              {videoJobs?.jobs[0] && (
+                <p className="mt-1 text-xs text-brand-700">
+                  {videoJobs.jobs[0].status} · {videoJobs.jobs[0].progress}% · {videoJobs.jobs[0].currentStage}
+                  {videoJobs.jobs[0].errorMessage ? ` — ${videoJobs.jobs[0].errorMessage}` : ''}
+                </p>
+              )}
+            </div>
+            <Button size="sm" onClick={() => mockVideo.mutate()} loading={mockVideo.isPending}>
+              Queue mock video
+            </Button>
+          </div>
         </Card>
       )}
 

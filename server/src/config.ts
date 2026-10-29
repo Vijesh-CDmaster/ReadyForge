@@ -34,6 +34,18 @@ export const config = {
   },
   // Local trained-model service (../ai-service, FastAPI). Empty = disabled.
   localAiUrl: (process.env.LOCAL_AI_URL || '').replace(/\/+$/, ''),
+  video: {
+    provider: process.env.VIDEO_PROVIDER || 'mock',
+    runwayApiKey: process.env.RUNWAY_API_KEY || '',
+    runwayBaseUrl: (process.env.RUNWAY_BASE_URL || 'https://api.dev.runwayml.com').replace(/\/+$/, ''),
+    runwayModel: process.env.RUNWAY_MODEL || 'gen4.5',
+    runwayEstimatedCost: num(process.env.RUNWAY_ESTIMATED_COST_USD, 0),
+    currency: process.env.VIDEO_COST_CURRENCY || 'USD',
+    maxCost: num(process.env.VIDEO_MAX_COST_USD, 0),
+    requestTimeoutMs: num(process.env.VIDEO_PROVIDER_TIMEOUT_MS, 30_000),
+    pollInitialMs: num(process.env.VIDEO_POLL_INITIAL_MS, 2_000),
+    pollMaxMs: num(process.env.VIDEO_POLL_MAX_MS, 15_000),
+  },
   upload: {
     dir: path.resolve(__dirname, '..', 'uploads'),
     maxMb: num(process.env.MAX_UPLOAD_MB, 25),

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { UploadCloud, Trash2, FileImage, FolderOpen, ShieldCheck } from 'lucide-react';
 import { api } from '../lib/api';
@@ -33,6 +33,7 @@ export default function AssetsLibrary() {
   const queryClient = useQueryClient();
   const fileInput = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
+  const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['assets', project?.id],
@@ -81,11 +82,45 @@ export default function AssetsLibrary() {
     onError: (err) => toast.error(err.message),
   });
 
+  const assets = data || [];
+  useEffect(() => {
+    let active = true;
+    const urls: string[] = [];
+    void Promise.all(
+      assets
+        .filter((asset) => asset.thumbnailUrl)
+        .map(async (asset) => {
+          try {
+            const blob = await api.getBlob(asset.fileUrl);
+            return [asset.id, URL.createObjectURL(blob)] as const;
+          } catch {
+            return null;
+          }
+        })
+    ).then((results) => {
+      if (!active) {
+        results.forEach((result) => result && URL.revokeObjectURL(result[1]));
+        return;
+      }
+      const next: Record<string, string> = {};
+      results.forEach((result) => {
+        if (result) {
+          next[result[0]] = result[1];
+          urls.push(result[1]);
+        }
+      });
+      setPreviewUrls(next);
+    });
+    return () => {
+      active = false;
+      urls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [assets]);
+
   if (!project) return <Loading />;
   if (isLoading) return <Loading label="Loading assets…" />;
   if (error) return <ErrorBox error={error} />;
 
-  const assets = data || [];
   const tasteMatches = tasteRecs?.recommendations.slice(0, 3) ?? [];
   const cleared = assets.filter((a) => a.licenseStatus === 'owned' || a.licenseStatus === 'licensed').length;
 
@@ -186,7 +221,7 @@ export default function AssetsLibrary() {
               <div className="flex h-36 items-center justify-center bg-slate-100 dark:bg-slate-800">
                 {a.thumbnailUrl ? (
                   <img
-                    src={a.fileUrl}
+                    src={previewUrls[a.id]}
                     alt={a.name}
                     className="max-h-32 w-full object-cover"
                     onError={(e) => {
