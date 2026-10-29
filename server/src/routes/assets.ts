@@ -2,6 +2,7 @@ import { Router } from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
 import multer from 'multer';
+import { isValidObjectId } from 'mongoose';
 import { z } from 'zod';
 import { Asset, IAsset, LICENSE_STATUSES } from '../models/Asset';
 import { Project } from '../models/Project';
@@ -55,13 +56,14 @@ const upload = multer({
 });
 
 function serialize(a: IAsset) {
+  const fileUrl = `/api/assets/${a._id.toString()}/file`;
   return {
     id: a._id.toString(),
     projectId: a.projectId?.toString() || null,
     name: a.name,
     type: a.type,
-    fileUrl: a.fileUrl,
-    thumbnailUrl: a.thumbnailUrl,
+    fileUrl,
+    thumbnailUrl: a.thumbnailUrl ? fileUrl : '',
     mimeType: a.mimeType,
     sizeBytes: a.sizeBytes,
     licenseStatus: a.licenseStatus,
@@ -76,6 +78,44 @@ function serialize(a: IAsset) {
     uploadedById: a.uploadedById.toString(),
     createdAt: a.createdAt,
   };
+}
+
+function resolveStoredAssetPath(fileUrl: string): string {
+  const normalizedUrl = fileUrl.replaceAll('\\', '/');
+  const prefix = '/uploads/';
+  const fileName = normalizedUrl.startsWith(prefix) ? normalizedUrl.slice(prefix.length) : '';
+  if (
+    !fileName ||
+    fileName.includes('/') ||
+    fileName === '.' ||
+    fileName === '..' ||
+    normalizedUrl.includes('/../') ||
+    normalizedUrl.includes('/./')
+  ) {
+    throw new ApiError(404, 'Asset file not found');
+  }
+  const uploadRoot = path.resolve(config.upload.dir);
+  const filePath = path.resolve(uploadRoot, fileName);
+  if (filePath !== uploadRoot && !filePath.startsWith(`${uploadRoot}${path.sep}`)) {
+    throw new ApiError(404, 'Asset file not found');
+  }
+  return filePath;
+}
+
+async function assertAssetAccess(req: AuthedRequest, asset: IAsset): Promise<void> {
+  const workspace = await Workspace.findById(asset.workspaceId).select('members');
+  const membership = workspace?.members.find(
+    (member) => member.userId.toString() === req.user!._id.toString() && member.status === 'active'
+  );
+  if (!workspace || (!membership && req.user!.platformRole !== 'admin')) {
+    throw new ApiError(404, 'Asset not found');
+  }
+  if (asset.projectId) {
+    const project = await Project.findById(asset.projectId).select('workspaceId');
+    if (!project || project.workspaceId.toString() !== asset.workspaceId.toString()) {
+      throw new ApiError(404, 'Asset not found');
+    }
+  }
 }
 
 async function assertWorkspaceRole(req: AuthedRequest, workspaceId: unknown, roles: string[]): Promise<void> {
@@ -151,6 +191,24 @@ assetsRouter.get(
   asyncHandler(async (req: AuthedRequest, res) => {
     const list = await Asset.find({ projectId: req.project!._id }).sort('-createdAt');
     res.json(list.map(serialize));
+  })
+);
+
+/* authenticated preview/download */
+assetsRouter.get(
+  '/assets/:id/file',
+  asyncHandler(async (req: AuthedRequest, res) => {
+    if (!isValidObjectId(req.params.id)) throw new ApiError(404, 'Asset not found');
+    const asset = await Asset.findById(req.params.id);
+    if (!asset) throw new ApiError(404, 'Asset not found');
+    await assertAssetAccess(req, asset);
+
+    const filePath = resolveStoredAssetPath(asset.fileUrl);
+    if (!fs.existsSync(filePath)) throw new ApiError(404, 'Asset file not found');
+
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.type(asset.mimeType || 'application/octet-stream');
+    res.sendFile(filePath);
   })
 );
 

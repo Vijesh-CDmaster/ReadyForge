@@ -576,8 +576,19 @@ projectsRouter.get(
       // Blockers reflect CURRENT project state, not the frozen generation snapshot.
       const { inputs, conflicts, assets } = await projectContext(req.project!._id);
       const live = computeReadiness({ project: req.project!, inputs, conflicts, assets, contract });
+      const contractPayload = contract.toObject() as unknown as Record<string, unknown>;
+      const approvedAssetIds = Array.isArray(contractPayload.approvedAssetIds)
+        ? contractPayload.approvedAssetIds.map((asset) => {
+            const value = asset as { _id?: unknown; fileUrl?: string };
+            return {
+              ...value,
+              fileUrl: value._id ? `/api/assets/${String(value._id)}/file` : undefined,
+            };
+          })
+        : [];
       payload = {
-        ...(contract.toObject() as unknown as Record<string, unknown>),
+        ...contractPayload,
+        approvedAssetIds,
         blockers: [
           ...live.blockingIssues.map((b) => b.message),
           ...contract.blockers.filter((c) => c.startsWith('Objective missing') || c.startsWith('Audience missing') || c.startsWith('Budget not set') || c.startsWith('No approved facts')),

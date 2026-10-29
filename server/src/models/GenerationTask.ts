@@ -6,6 +6,8 @@ export type TaskType = (typeof TASK_TYPES)[number];
 
 export const TASK_STATUSES = ['queued', 'running', 'completed', 'failed', 'cancelled', 'requires_approval'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
+export const VIDEO_JOB_MODES = ['success', 'retryable_failure', 'permanent_failure', 'timeout'] as const;
+export type VideoJobMode = (typeof VIDEO_JOB_MODES)[number];
 
 export const TASK_DECISIONS = ['pending', 'approved', 'rejected', 'changes_requested'] as const;
 export type TaskDecision = (typeof TASK_DECISIONS)[number];
@@ -50,6 +52,31 @@ export interface IGenerationTask {
   completedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
+  workspaceId?: Types.ObjectId;
+  progress?: number;
+  currentStage?: string;
+  maxAttempts?: number;
+  retryCount?: number;
+  nextAttemptAt?: Date;
+  leaseId?: string;
+  leaseExpiresAt?: Date;
+  heartbeatAt?: Date;
+  idempotencyKey?: string;
+  requestFingerprint?: string;
+  correlationId?: string;
+  contractVersion?: number;
+  errorCode?: string;
+  errorMessage?: string;
+  providerMode?: VideoJobMode;
+  mockOutput?: boolean;
+  providerId?: string;
+  providerJobId?: string;
+  providerStatus?: string;
+  budgetReservationId?: Types.ObjectId;
+  costCurrency?: string;
+  timeoutAt?: Date;
+  outputAssetId?: Types.ObjectId;
+  ambiguousSubmission?: boolean;
 }
 
 const generationTaskSchema = new Schema<IGenerationTask>(
@@ -79,8 +106,36 @@ const generationTaskSchema = new Schema<IGenerationTask>(
     regenerationNotes: { type: String },
     startedAt: { type: Date },
     completedAt: { type: Date },
+    workspaceId: { type: Schema.Types.ObjectId, ref: 'Workspace', index: true },
+    progress: { type: Number, min: 0, max: 100, default: 0 },
+    currentStage: { type: String, default: '' },
+    maxAttempts: { type: Number, min: 1, max: 10, default: 3 },
+    retryCount: { type: Number, min: 0, default: 0 },
+    nextAttemptAt: { type: Date },
+    leaseId: { type: String },
+    leaseExpiresAt: { type: Date, index: true },
+    heartbeatAt: { type: Date },
+    idempotencyKey: { type: String },
+    requestFingerprint: { type: String },
+    correlationId: { type: String, index: true },
+    contractVersion: { type: Number },
+    errorCode: { type: String },
+    errorMessage: { type: String },
+    providerMode: { type: String, enum: VIDEO_JOB_MODES, default: 'success' },
+    mockOutput: { type: Boolean, default: false },
+    providerId: { type: String },
+    providerJobId: { type: String },
+    providerStatus: { type: String },
+    budgetReservationId: { type: Schema.Types.ObjectId, ref: 'BudgetReservation' },
+    costCurrency: { type: String },
+    timeoutAt: { type: Date },
+    outputAssetId: { type: Schema.Types.ObjectId, ref: 'Asset' },
+    ambiguousSubmission: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
+
+generationTaskSchema.index({ projectId: 1, idempotencyKey: 1 }, { unique: true, sparse: true });
+generationTaskSchema.index({ status: 1, nextAttemptAt: 1, leaseExpiresAt: 1 });
 
 export const GenerationTask = model<IGenerationTask>('GenerationTask', generationTaskSchema);

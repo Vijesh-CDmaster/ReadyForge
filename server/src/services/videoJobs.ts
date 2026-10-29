@@ -1,0 +1,381 @@
+import crypto from 'node:crypto';
+import { Types } from 'mongoose';
+import { GenerationTask, IGenerationTask } from '../models/GenerationTask';
+import { Project } from '../models/Project';
+import { ProductionContract } from '../models/ProductionContract';
+import { KnowledgeInput } from '../models/KnowledgeInput';
+import { Conflict } from '../models/Conflict';
+import { Asset } from '../models/Asset';
+import { computeReadiness } from '../engines/readiness';
+import { ApiError } from '../http';
+import { audit } from '../audit';
+import { generateMockVideo, MockProviderError } from './mockVideoProvider';
+import { getVideoProvider } from './videoProviderFactory';
+import { config } from '../config';
+import { reserveVideoBudget } from './videoBudget';
+
+const LEASE_MS = 30_000;
+const POLL_MS = 100;
+const DEFAULT_MAX_ATTEMPTS = 3;
+
+export function fingerprintJob(input: { stage: string; mode: string; contractVersion: number }): string {
+  return crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex');
+}
+
+export function serializeVideoJob(task: IGenerationTask) {
+  const status =
+    task.status === 'requires_approval' || task.status === 'completed' ? 'succeeded' : task.status;
+  return {
+    id: task._id.toString(),
+    projectId: task.projectId.toString(),
+    workspaceId: task.workspaceId?.toString() ?? null,
+    status,
+    legacyStatus: task.status,
+    progress: task.progress ?? 0,
+    currentStage: task.currentStage ?? '',
+    retryCount: task.retryCount ?? 0,
+    maxAttempts: task.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+    contractVersion: task.contractVersion ?? null,
+    correlationId: task.correlationId ?? null,
+    providerId: task.providerId ?? null,
+    providerStatus: task.providerStatus ?? null,
+    outputAssetId: task.outputAssetId?.toString() ?? null,
+    estimatedCost: task.estimatedCost ?? 0,
+    actualCost: task.actualCost ?? 0,
+    costCurrency: task.costCurrency ?? null,
+    ambiguousSubmission: task.ambiguousSubmission === true,
+    mockOutput: task.mockOutput === true,
+    outputText: task.outputText || null,
+    errorCode: task.errorCode ?? null,
+    errorMessage: task.errorMessage ?? null,
+    reviewStatus: task.reviewStatus,
+    createdAt: task.createdAt,
+    startedAt: task.startedAt ?? null,
+    completedAt: task.completedAt ?? null,
+  };
+}
+
+export async function submitVideoJob(params: {
+  projectId: Types.ObjectId;
+  workspaceId: Types.ObjectId;
+  userId: Types.ObjectId;
+  stage: 'final';
+  mode: IGenerationTask['providerMode'];
+  idempotencyKey: string;
+}): Promise<{ task: IGenerationTask; duplicate: boolean }> {
+  const project = await Project.findById(params.projectId);
+  if (!project) throw new ApiError(404, 'Project not found');
+  if (project.workspaceId.toString() !== params.workspaceId.toString()) {
+    throw new ApiError(404, 'Project not found');
+  }
+  const contract = await ProductionContract.findOne({
+    projectId: project._id,
+    status: { $in: ['approved', 'locked'] },
+  }).sort('-version');
+  if (!contract) throw new ApiError(409, 'An approved or locked Production Contract is required.');
+
+  const requestFingerprint = fingerprintJob({
+    stage: params.stage,
+    mode: params.mode || 'success',
+    contractVersion: contract.version,
+  });
+  const provider = getVideoProvider();
+  if (provider.id !== 'mock') {
+    const [inputs, conflicts, assets] = await Promise.all([
+      KnowledgeInput.find({ projectId: project._id }),
+      Conflict.find({ projectId: project._id }),
+      Asset.find({ projectId: project._id, workspaceId: params.workspaceId }),
+    ]);
+    const readiness = computeReadiness({ project, inputs, conflicts, assets, contract });
+    if (readiness.blockingIssues.length) {
+      throw new ApiError(409, 'Readiness blockers prevent paid video generation.');
+    }
+    const availableAssetIds = new Set(assets.map((asset) => asset._id.toString()));
+    if (contract.approvedAssetIds.some((id) => !availableAssetIds.has(id.toString()))) {
+      throw new ApiError(409, 'Approved Production Contract assets are no longer available.');
+    }
+    throw new ApiError(503, 'The selected real video provider is not enabled until output storage and billing reconciliation are configured.');
+  }
+  const providerEstimate = await provider.estimateCost({
+    prompt: `Generate video for "${project.title}"`,
+    model: config.video.runwayModel,
+    durationSeconds: 5,
+    aspectRatio: '1280:720',
+    correlationId: 'estimate',
+    idempotencyKey: params.idempotencyKey,
+  });
+  if (providerEstimate.amount > 0 && (!config.video.maxCost || providerEstimate.amount > config.video.maxCost)) {
+    throw new ApiError(402, 'The estimated video cost exceeds the configured per-job ceiling.');
+  }
+  const correlationId = crypto.randomUUID();
+  const existing = await GenerationTask.findOne({
+    projectId: project._id,
+    idempotencyKey: params.idempotencyKey,
+  });
+  if (existing) {
+    if (existing.requestFingerprint !== requestFingerprint) {
+      throw new ApiError(409, 'Idempotency key was already used for a different request.');
+    }
+    return { task: existing, duplicate: true };
+  }
+
+  try {
+    const task = await GenerationTask.create({
+      projectId: project._id,
+      workspaceId: params.workspaceId,
+      contractId: contract._id,
+      contractVersion: contract.version,
+      createdById: params.userId,
+      taskType: 'final',
+      stage: 'final',
+      status: 'queued',
+      attempt: 1,
+      inputPrompt: `Generate mock video for "${project.title}"`,
+      estimatedCost: 0,
+      actualCost: 0,
+      idempotencyKey: params.idempotencyKey,
+      requestFingerprint,
+      correlationId,
+      providerMode: params.mode || 'success',
+      mockOutput: provider.id === 'mock',
+      providerId: provider.id,
+      costCurrency: providerEstimate.currency,
+      maxAttempts: DEFAULT_MAX_ATTEMPTS,
+    });
+    if (providerEstimate.amount > 0) {
+      const reservation = await reserveVideoBudget({
+        projectId: project._id,
+        generationTaskId: task._id,
+        key: `video:${task._id.toString()}`,
+        amount: providerEstimate.amount,
+        currency: providerEstimate.currency,
+      });
+      task.budgetReservationId = reservation._id;
+      task.estimatedCost = providerEstimate.amount;
+      await task.save();
+    }
+    audit({
+      workspaceId: params.workspaceId.toString(),
+      projectId: project._id.toString(),
+      actorId: params.userId.toString(),
+      action: 'video_job.create',
+      entityType: 'generation_task',
+      entityId: task._id.toString(),
+      after: { status: task.status, contractVersion: contract.version, mock: true },
+    });
+    return { task, duplicate: false };
+  } catch (error) {
+    if ((error as { code?: number }).code !== 11000) throw error;
+    const existing = await GenerationTask.findOne({
+      projectId: project._id,
+      idempotencyKey: params.idempotencyKey,
+    });
+    if (!existing) throw error;
+    if (existing.requestFingerprint !== requestFingerprint) {
+      throw new ApiError(409, 'Idempotency key was already used for a different request.');
+    }
+    return { task: existing, duplicate: true };
+  }
+}
+
+async function recoverStaleJobs(now = new Date()): Promise<number> {
+  const retryable = await GenerationTask.updateMany(
+    { status: 'running', leaseExpiresAt: { $lt: now }, retryCount: { $lt: DEFAULT_MAX_ATTEMPTS } },
+    {
+      $set: { status: 'queued', currentStage: 'recovered after worker lease expiry', nextAttemptAt: now },
+      $unset: { leaseId: 1, leaseExpiresAt: 1, heartbeatAt: 1 },
+      $inc: { retryCount: 1 },
+    }
+  );
+  const terminal = await GenerationTask.updateMany(
+    { status: 'running', leaseExpiresAt: { $lt: now }, retryCount: { $gte: DEFAULT_MAX_ATTEMPTS } },
+    {
+      $set: {
+        status: 'failed',
+        currentStage: 'worker lease expired',
+        errorCode: 'WORKER_LEASE_EXPIRED',
+        errorMessage: 'The worker lease expired after the retry limit was reached.',
+        completedAt: now,
+      },
+      $unset: { leaseId: 1, leaseExpiresAt: 1, heartbeatAt: 1 },
+    }
+  );
+  return retryable.modifiedCount + terminal.modifiedCount;
+}
+
+async function claimJob(workerId: string): Promise<IGenerationTask | null> {
+  const now = new Date();
+  const leaseId = crypto.randomUUID();
+  return GenerationTask.findOneAndUpdate(
+    {
+      status: 'queued',
+      $or: [{ nextAttemptAt: { $exists: false } }, { nextAttemptAt: { $lte: now } }],
+    },
+    {
+      $set: {
+        status: 'running',
+        leaseId,
+        leaseExpiresAt: new Date(now.getTime() + LEASE_MS),
+        heartbeatAt: now,
+        startedAt: now,
+        currentStage: `claimed by ${workerId}`,
+      },
+    },
+    { sort: { createdAt: 1 }, new: true }
+  ).lean();
+}
+
+async function heartbeat(taskId: Types.ObjectId, leaseId: string, progress: number, stage: string): Promise<boolean> {
+  const now = new Date();
+  const updated = await GenerationTask.updateOne(
+    { _id: taskId, status: 'running', leaseId, leaseExpiresAt: { $gt: now } },
+    {
+      $set: {
+        progress,
+        currentStage: stage,
+        heartbeatAt: now,
+        leaseExpiresAt: new Date(now.getTime() + LEASE_MS),
+      },
+    }
+  );
+  return updated.modifiedCount === 1;
+}
+
+async function processJob(task: IGenerationTask): Promise<void> {
+  const leaseId = task.leaseId;
+  if (!leaseId || !task.workspaceId || !task.contractVersion) {
+    await GenerationTask.updateOne(
+      { _id: task._id, status: 'running', leaseId },
+      { $set: { status: 'failed', errorCode: 'INVALID_JOB', errorMessage: 'Video job metadata is incomplete.' }, $unset: { leaseId: 1, leaseExpiresAt: 1, heartbeatAt: 1 } }
+    );
+    return;
+  }
+  try {
+    const project = await Project.findById(task.projectId).select('title workspaceId');
+    if (!project) throw new MockProviderError('Project no longer exists.', 'MOCK_PERMANENT', false);
+    const contract = await ProductionContract.findOne({
+      _id: task.contractId,
+      projectId: task.projectId,
+      version: task.contractVersion,
+      status: { $in: ['approved', 'locked'] },
+    });
+    if (!contract) throw new MockProviderError('The captured Production Contract is no longer approved.', 'MOCK_PERMANENT', false);
+    if (task.providerId && task.providerId !== 'mock') {
+      await GenerationTask.updateOne(
+        { _id: task._id, status: 'running', leaseId },
+        {
+          $set: {
+            status: 'failed',
+            errorCode: 'REAL_PROVIDER_WORKER_NOT_ENABLED',
+            errorMessage: 'The real provider adapter is available for contract testing but paid worker execution is disabled until output storage and reconciliation are enabled.',
+            currentStage: 'manual implementation gate',
+          },
+          $unset: { leaseId: 1, leaseExpiresAt: 1, heartbeatAt: 1 },
+        }
+      );
+      return;
+    }
+    const result = await generateMockVideo(
+      { projectTitle: project.title, contractVersion: task.contractVersion, mode: task.providerMode || 'success' },
+      async (progress, stage) => {
+        if (!(await heartbeat(task._id, leaseId, progress, stage))) {
+          throw new MockProviderError('Worker lease was lost.', 'MOCK_RETRYABLE', true);
+        }
+      }
+    );
+    const now = new Date();
+    const completed = await GenerationTask.updateOne(
+      { _id: task._id, status: 'running', leaseId, leaseExpiresAt: { $gt: now } },
+      {
+        $set: {
+          status: 'requires_approval',
+          progress: 100,
+          currentStage: 'mock output ready for review',
+          outputText: result.outputText,
+          modelName: result.model,
+          modelProvider: 'mock',
+          actualCost: 0,
+          mockOutput: true,
+          completedAt: now,
+          errorCode: undefined,
+          errorMessage: undefined,
+        },
+        $unset: { leaseId: 1, leaseExpiresAt: 1, heartbeatAt: 1 },
+      }
+    );
+    if (completed.modifiedCount !== 1) return;
+    audit({
+      workspaceId: task.workspaceId.toString(),
+      projectId: task.projectId.toString(),
+      actorType: 'system',
+      action: 'video_job.completed',
+      entityType: 'generation_task',
+      entityId: task._id.toString(),
+      after: { mock: true, reviewStatus: 'pending' },
+    });
+  } catch (error) {
+    const providerError = error instanceof MockProviderError
+      ? error
+      : new MockProviderError('Mock job failed.', 'MOCK_RETRYABLE', true);
+    const retryable = providerError.retryable && (task.retryCount ?? 0) + 1 < (task.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
+    const now = new Date();
+    await GenerationTask.updateOne(
+      { _id: task._id, status: 'running', leaseId },
+      retryable
+        ? {
+            $set: {
+              status: 'queued',
+              currentStage: 'retry scheduled',
+              nextAttemptAt: new Date(now.getTime() + Math.min(5_000, 250 * 2 ** (task.retryCount ?? 0))),
+              errorCode: providerError.code,
+              errorMessage: providerError.message,
+            },
+            $inc: { retryCount: 1 },
+            $unset: { leaseId: 1, leaseExpiresAt: 1, heartbeatAt: 1 },
+          }
+        : {
+            $set: {
+              status: 'failed',
+              currentStage: 'mock job failed',
+              errorCode: providerError.code,
+              errorMessage: providerError.message,
+              completedAt: now,
+            },
+            $unset: { leaseId: 1, leaseExpiresAt: 1, heartbeatAt: 1 },
+          }
+    );
+  }
+}
+
+export class VideoJobWorker {
+  private stopping = false;
+  private timer?: ReturnType<typeof setTimeout>;
+  private activeTick?: Promise<void>;
+  private readonly workerId = `worker-${crypto.randomUUID()}`;
+
+  start(): void {
+    this.stopping = false;
+    void this.tick();
+  }
+
+  async stop(): Promise<void> {
+    this.stopping = true;
+    if (this.timer) clearTimeout(this.timer);
+    if (this.activeTick) await this.activeTick;
+  }
+
+  private async tick(): Promise<void> {
+    if (this.stopping) return;
+    this.activeTick = (async () => {
+      await recoverStaleJobs();
+      const task = await claimJob(this.workerId);
+      if (task) await processJob(task);
+      if (!this.stopping) this.timer = setTimeout(() => void this.tick(), POLL_MS);
+    })();
+    try {
+      await this.activeTick;
+    } finally {
+      this.activeTick = undefined;
+    }
+  }
+}

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { HydratedDocument } from 'mongoose';
 import { ApiError, asyncHandler, validateBody } from '../http';
 import { audit, clientIp } from '../audit';
-import { AuthedRequest, requireAuth, requireProject } from '../middleware/auth';
+import { AuthedRequest, getAuthorizedProject, requireAuth, requireProject } from '../middleware/auth';
 import { IProject, LADDER_STAGES, Project } from '../models/Project';
 import { IProductionContract, ProductionContract, IStoryboardScene } from '../models/ProductionContract';
 import { GenerationTask, STAGE_TASK, IGenerationTask } from '../models/GenerationTask';
@@ -30,9 +30,97 @@ import { verifyOutput } from '../ai/verify';
 import { loadTasteDirection } from '../ai/taste';
 import { TasteProfile } from '../models/TasteProfile';
 import { chargeProjectBudget, refundProjectBudget } from '../services/budget';
+import { serializeVideoJob, submitVideoJob } from '../services/videoJobs';
 
 export const generationRouter = Router();
 generationRouter.use(requireAuth);
+
+const videoJobSchema = z.object({
+  stage: z.literal('final').default('final'),
+  mode: z.enum(['success', 'retryable_failure', 'permanent_failure', 'timeout']).default('success'),
+});
+
+generationRouter.post(
+  '/projects/:id/video-jobs',
+  requireProject(),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const body = validateBody(videoJobSchema, req.body || {});
+    const key = String(req.headers['idempotency-key'] || '').trim();
+    if (!key || key.length > 200) throw new ApiError(400, 'A valid Idempotency-Key header is required.');
+    const result = await submitVideoJob({
+      projectId: req.project!._id,
+      workspaceId: req.workspace!._id,
+      userId: req.user!._id,
+      stage: body.stage,
+      mode: body.mode,
+      idempotencyKey: key,
+    });
+    res.status(result.duplicate ? 200 : 202).json({ job: serializeVideoJob(result.task), duplicate: result.duplicate });
+  })
+);
+
+generationRouter.get(
+  '/video-jobs/:id',
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const task = await GenerationTask.findById(req.params.id);
+    if (!task || !task.workspaceId) throw new ApiError(404, 'Video job not found');
+    await getAuthorizedProject(req.user!, task.projectId);
+    res.json({ job: serializeVideoJob(task) });
+  })
+);
+
+generationRouter.get(
+  '/projects/:id/video-jobs',
+  requireProject(),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
+    const skip = Math.max(Number(req.query.skip) || 0, 0);
+    const [jobs, total] = await Promise.all([
+      GenerationTask.find({ projectId: req.project!._id, providerId: { $in: ['mock', 'runway'] } }).sort('-createdAt').skip(skip).limit(limit),
+      GenerationTask.countDocuments({ projectId: req.project!._id, providerId: { $in: ['mock', 'runway'] } }),
+    ]);
+    res.json({ jobs: jobs.map(serializeVideoJob), total, limit, skip });
+  })
+);
+
+generationRouter.post(
+  '/video-jobs/:id/retry',
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const task = await GenerationTask.findOne({ _id: req.params.id, providerId: { $in: ['mock', 'runway'] } });
+    if (!task) throw new ApiError(404, 'Video job not found');
+    await getAuthorizedProject(req.user!, task.projectId);
+    if (task.status !== 'failed') throw new ApiError(409, 'Only failed video jobs can be retried.');
+    if ((task.retryCount ?? 0) >= (task.maxAttempts ?? 3)) {
+      throw new ApiError(409, 'Video job retry limit reached.');
+    }
+    task.status = 'queued';
+    task.nextAttemptAt = new Date();
+    task.errorCode = undefined;
+    task.errorMessage = undefined;
+    task.currentStage = 'retry requested';
+    await task.save();
+    res.status(202).json({ job: serializeVideoJob(task) });
+  })
+);
+
+generationRouter.post(
+  '/video-jobs/:id/cancel',
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const existing = await GenerationTask.findOne({ _id: req.params.id, providerId: { $in: ['mock', 'runway'] } });
+    if (!existing) throw new ApiError(404, 'Video job not found');
+    await getAuthorizedProject(req.user!, existing.projectId);
+    if (existing.status === 'running') {
+      throw new ApiError(409, 'Running provider jobs cannot be cancelled safely; cancellation is advisory only.');
+    }
+    const task = await GenerationTask.findOneAndUpdate(
+      { _id: existing._id, providerId: { $in: ['mock', 'runway'] }, status: 'queued' },
+      { $set: { status: 'cancelled', completedAt: new Date(), currentStage: 'cancelled' } },
+      { new: true }
+    );
+    if (!task) throw new ApiError(409, 'Video job is no longer queued.');
+    res.json({ job: serializeVideoJob(task) });
+  })
+);
 
 const VERIFY_COST = 10;
 
@@ -906,6 +994,9 @@ async function buildProvenancePassport(
         latencyMs: t.latencyMs,
         status: t.status,
         reviewStatus: t.reviewStatus,
+        contractVersion: t.contractVersion ?? null,
+        provider: t.providerId ?? t.modelProvider,
+        outputAssetId: t.outputAssetId?.toString() ?? null,
         createdAt: t.createdAt,
       })),
       reviews: reviews.map((r) => ({

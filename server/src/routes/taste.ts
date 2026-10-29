@@ -478,7 +478,7 @@ tasteRouter.get(
         return {
           id: String(a._id),
           name: a.name || 'Untitled asset',
-          url: a.fileUrl,
+          url: `/api/assets/${a._id.toString()}/file`,
           kind: a.type,
           score: Math.min(100, matches.length * 25 + (matches.length ? 25 : 0)),
           matchedOn: matches,
