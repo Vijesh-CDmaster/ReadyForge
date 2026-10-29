@@ -66,6 +66,7 @@ function serialize(a: IAsset) {
     thumbnailUrl: a.thumbnailUrl ? fileUrl : '',
     mimeType: a.mimeType,
     sizeBytes: a.sizeBytes,
+    sourceDurationSeconds: a.sourceDurationSeconds,
     licenseStatus: a.licenseStatus,
     licenseType: a.licenseType,
     licenseOwner: a.licenseOwner,

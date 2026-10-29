@@ -22,6 +22,7 @@ import { intelligenceRouter } from './routes/intelligence';
 import { tasteRouter } from './routes/taste';
 import { commentsRouter } from './routes/comments';
 import { adminRouter } from './routes/admin';
+import { compositionsRouter } from './routes/compositions';
 import { VideoJobWorker } from './services/videoJobs';
 
 export function createApp() {
@@ -97,6 +98,7 @@ export function createApp() {
   mount('/api/taste', tasteRouter);
   mount('/api', commentsRouter);
   mount('/api/admin', adminRouter);
+  mount('/api', compositionsRouter);
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Endpoint not found' }));
   app.use(errorHandler);

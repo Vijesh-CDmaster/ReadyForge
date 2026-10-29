@@ -15,6 +15,7 @@ interface AssetRow {
   thumbnailUrl?: string;
   mimeType: string;
   sizeBytes: number;
+  sourceDurationSeconds?: number;
   licenseStatus: 'owned' | 'licensed' | 'unknown' | 'restricted' | 'expired';
   aiGenerated: boolean;
   consentStatus: string;

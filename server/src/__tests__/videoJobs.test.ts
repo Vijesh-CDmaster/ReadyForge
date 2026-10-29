@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import bcrypt from 'bcryptjs';
 import http from 'node:http';
 import { Types } from 'mongoose';
@@ -75,6 +75,16 @@ async function waitForStatus(id: Types.ObjectId, status: string, timeout = 2000)
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Timed out waiting for ${status}`);
+}
+
+async function waitForTask(id: Types.ObjectId, predicate: (task: InstanceType<typeof GenerationTask>) => boolean, timeout = 2000) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    const task = await GenerationTask.findById(id);
+    if (task && predicate(task)) return task;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('Timed out waiting for generation task condition');
 }
 
 function fakeProvider(onSubmit: () => void): VideoProvider {
@@ -629,6 +639,82 @@ describe('durable mock video jobs', () => {
     expect(submitCalls).toBe(1);
   });
 
+  it('rechecks authorization immediately before provider submission', async () => {
+    const { user, workspace, project, contract } = await setup();
+    const task = await GenerationTask.create({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      contractId: contract._id,
+      contractVersion: contract.version,
+      createdById: user._id,
+      taskType: 'final',
+      stage: 'final',
+      status: 'running',
+      leaseId: 'submission-race',
+      leaseExpiresAt: new Date(Date.now() + 30_000),
+      idempotencyKey: 'submission-race',
+    });
+    await attachReservation(task, project);
+    let submitCalls = 0;
+    const provider = fakeProvider(() => {
+      submitCalls += 1;
+    });
+
+    await expect(
+      processRealProviderJob(task, project, contract, 'submission-race', provider, async () => {
+        await Conflict.create({
+          projectId: project._id,
+          workspaceId: workspace._id,
+          title: 'Authorization changed before submission',
+          description: 'A high-severity conflict was introduced after the initial check.',
+          severity: 'high',
+          status: 'open',
+          conflictType: 'factual',
+          detectedBy: 'system',
+        });
+      })
+    ).rejects.toMatchObject({
+      kind: 'validation',
+      message: expect.stringContaining('provider_submission_authorization'),
+    });
+    expect(submitCalls).toBe(0);
+  });
+
+  it('rejects provider submission when the worker lease becomes stale', async () => {
+    const { user, workspace, project, contract } = await setup();
+    const task = await GenerationTask.create({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      contractId: contract._id,
+      contractVersion: contract.version,
+      createdById: user._id,
+      taskType: 'final',
+      stage: 'final',
+      status: 'running',
+      leaseId: 'stale-submission',
+      leaseExpiresAt: new Date(Date.now() + 30_000),
+      idempotencyKey: 'stale-submission',
+    });
+    await attachReservation(task, project);
+    let submitCalls = 0;
+    const provider = fakeProvider(() => {
+      submitCalls += 1;
+    });
+
+    await expect(
+      processRealProviderJob(task, project, contract, 'stale-submission', provider, async () => {
+        await GenerationTask.updateOne(
+          { _id: task._id },
+          { $set: { leaseId: 'new-worker', leaseExpiresAt: new Date(Date.now() + 30_000) } }
+        );
+      })
+    ).rejects.toMatchObject({
+      kind: 'validation',
+      message: expect.stringContaining('provider_submission_authorization'),
+    });
+    expect(submitCalls).toBe(0);
+  });
+
   it('revalidates queued mock jobs before execution when evidence changes', async () => {
     const { user, workspace, project } = await setup();
     const { task } = await submitVideoJob({
@@ -654,6 +740,65 @@ describe('durable mock video jobs', () => {
     const failed = await waitForStatus(task._id, 'failed');
     await worker.stop();
     expect(failed.errorMessage).toContain('unlicensed_asset');
+  });
+
+  it('rejects a queued job through the real worker when its budget is reduced', async () => {
+    const { user, workspace, project } = await setup();
+    const { task } = await submitVideoJob({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      userId: user._id,
+      stage: 'final',
+      mode: 'success',
+      idempotencyKey: 'worker-budget-reduced',
+    });
+    const reservation = await BudgetReservation.findById(task.budgetReservationId);
+    expect(reservation).toBeTruthy();
+    await BudgetReservation.updateOne(
+      { _id: reservation!._id },
+      { $set: { estimatedAmount: 20 } }
+    );
+    await GenerationTask.updateOne(
+      { _id: task._id },
+      { $set: { estimatedCost: 20, costCurrency: 'INR' } }
+    );
+    await Project.updateOne(
+      { _id: project._id },
+      { $set: { 'budget.amount': 10, 'budget.spent': 20, 'budget.remaining': 0 } }
+    );
+    const worker = new VideoJobWorker();
+    worker.start();
+    const failed = await waitForStatus(task._id, 'failed');
+    await worker.stop();
+    const freshProject = await Project.findById(project._id);
+    expect(failed.errorMessage).toContain('budget_exceeded');
+    expect(freshProject?.budget.spent).toBe(0);
+    expect(await BudgetReservation.countDocuments({ generationTaskId: task._id })).toBe(1);
+    expect((await BudgetReservation.findById(task.budgetReservationId))?.status).toBe('refunded');
+  });
+
+  it('fails closed through the real worker when a queued reservation becomes invalid', async () => {
+    const { user, workspace, project } = await setup();
+    const { task } = await submitVideoJob({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      userId: user._id,
+      stage: 'final',
+      mode: 'success',
+      idempotencyKey: 'worker-invalid-reservation',
+    });
+    await BudgetReservation.updateOne(
+      { _id: task.budgetReservationId },
+      { $set: { status: 'settled' } }
+    );
+    const worker = new VideoJobWorker();
+    worker.start();
+    const failed = await waitForStatus(task._id, 'failed');
+    await worker.stop();
+    const freshProject = await Project.findById(project._id);
+    expect(failed.errorMessage).toContain('invalid_budget_reservation');
+    expect(freshProject?.budget.spent).toBe(0);
+    expect(await BudgetReservation.countDocuments({ generationTaskId: task._id })).toBe(1);
   });
 
   it('revalidates persisted evidence for the real-provider worker boundary', async () => {
@@ -750,6 +895,121 @@ describe('durable mock video jobs', () => {
     const freshProject = await Project.findById(project._id);
     expect(freshProject?.budget.spent).toBe(0);
     expect(await BudgetReservation.countDocuments({ generationTaskId: task._id })).toBe(1);
+    expect((await BudgetReservation.findById(task.budgetReservationId))?.status).toBe('settled');
+  });
+
+  it('settles a nonzero mock reservation at actual cost zero', async () => {
+    const { user, workspace, project } = await setup();
+    const { task } = await submitVideoJob({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      userId: user._id,
+      stage: 'final',
+      mode: 'success',
+      idempotencyKey: 'worker-nonzero-mock',
+    });
+    await BudgetReservation.updateOne(
+      { _id: task.budgetReservationId },
+      { $set: { estimatedAmount: 20 } }
+    );
+    await GenerationTask.updateOne(
+      { _id: task._id },
+      { $set: { estimatedCost: 20, costCurrency: 'INR' } }
+    );
+    await Project.updateOne(
+      { _id: project._id },
+      { $set: { 'budget.spent': 20, 'budget.remaining': 80 } }
+    );
+    const worker = new VideoJobWorker();
+    worker.start();
+    await waitForStatus(task._id, 'requires_approval');
+    await worker.stop();
+    const freshProject = await Project.findById(project._id);
+    const reservation = await BudgetReservation.findById(task.budgetReservationId);
+    expect(freshProject?.budget.spent).toBe(0);
+    expect(reservation?.status).toBe('settled');
+    expect(reservation?.actualAmount).toBe(0);
+  });
+
+  it('marks settlement completion failure for reconciliation without repeating generation', async () => {
+    const { user, workspace, project } = await setup();
+    const { task } = await submitVideoJob({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      userId: user._id,
+      stage: 'final',
+      mode: 'success',
+      idempotencyKey: 'worker-settlement-update-failure',
+    });
+    const originalUpdateOne = GenerationTask.updateOne.bind(GenerationTask);
+    const updateSpy = vi.spyOn(GenerationTask, 'updateOne').mockImplementation((...args: any[]) => {
+      const [filter, update, options] = args;
+      if (update?.$set?.status === 'requires_approval') {
+        return Promise.resolve({ modifiedCount: 0 } as any);
+      }
+      return originalUpdateOne(filter, update, options) as any;
+    });
+    const worker = new VideoJobWorker();
+    worker.start();
+    const failed = await waitForStatus(task._id, 'failed');
+    await worker.stop();
+    updateSpy.mockRestore();
+
+    const reservation = await BudgetReservation.findById(task.budgetReservationId);
+    const projectAfterFailure = await Project.findById(project._id);
+    expect(failed.errorCode).toBe('MOCK_SETTLEMENT_TASK_UPDATE_FAILED');
+    expect(failed.currentStage).toContain('manual settlement reconciliation');
+    expect(reservation?.status).toBe('settled');
+    expect(reservation?.actualAmount).toBe(0);
+    expect(projectAfterFailure?.budget.spent).toBe(0);
+
+    const secondWorker = new VideoJobWorker();
+    secondWorker.start();
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    await secondWorker.stop();
+    const afterRecovery = await GenerationTask.findById(task._id);
+    expect(afterRecovery?.status).toBe('failed');
+    expect(afterRecovery?.errorCode).toBe('MOCK_SETTLEMENT_TASK_UPDATE_FAILED');
+    expect((await BudgetReservation.findById(task.budgetReservationId))?.status).toBe('settled');
+    expect((await Project.findById(project._id))?.budget.spent).toBe(0);
+  });
+
+  it('refunds a reservation on terminal mock failure through the worker', async () => {
+    const { user, workspace, project } = await setup();
+    const { task } = await submitVideoJob({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      userId: user._id,
+      stage: 'final',
+      mode: 'permanent_failure',
+      idempotencyKey: 'worker-terminal-failure',
+    });
+    const worker = new VideoJobWorker();
+    worker.start();
+    const failed = await waitForStatus(task._id, 'failed');
+    await worker.stop();
+    expect(failed.errorCode).toBe('MOCK_PERMANENT');
+    expect((await BudgetReservation.findById(task.budgetReservationId))?.status).toBe('refunded');
+    expect((await Project.findById(project._id))?.budget.spent).toBe(0);
+  });
+
+  it('retains a reservation when a mock failure is retryable', async () => {
+    const { user, workspace, project } = await setup();
+    const { task } = await submitVideoJob({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      userId: user._id,
+      stage: 'final',
+      mode: 'retryable_failure',
+      idempotencyKey: 'worker-retryable-failure',
+    });
+    const worker = new VideoJobWorker();
+    worker.start();
+    const queued = await waitForTask(task._id, (current) => current.errorCode === 'MOCK_RETRYABLE');
+    await worker.stop();
+    expect(queued.errorCode).toBe('MOCK_RETRYABLE');
+    expect((await BudgetReservation.findById(task.budgetReservationId))?.status).toBe('reserved');
+    expect((await Project.findById(project._id))?.budget.spent).toBe(0);
   });
 
   it('does not let an expired lease overwrite a newer worker result', async () => {

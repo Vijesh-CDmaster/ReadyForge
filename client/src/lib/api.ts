@@ -147,6 +147,8 @@ export const api = {
   postWithHeaders: <T>(path: string, body: unknown, extraHeaders: Record<string, string>) =>
     request<T>(path, { method: 'POST', body, extraHeaders }),
   put: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PUT', body }),
+  putWithHeaders: <T>(path: string, body: unknown, extraHeaders: Record<string, string>) =>
+    request<T>(path, { method: 'PUT', body, extraHeaders }),
   patch: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PATCH', body }),
   del: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
   getBlob: (path: string) => requestBlob(path),

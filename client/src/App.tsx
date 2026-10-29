@@ -29,6 +29,7 @@ const NotificationsPage = lazy(() => import('./pages/NotificationsPage'));
 const DraftLadder = lazy(() => import('./pages/DraftLadder'));
 const ScriptEditor = lazy(() => import('./pages/ScriptEditor'));
 const StoryboardEditor = lazy(() => import('./pages/StoryboardEditor'));
+const VideoEditor = lazy(() => import('./pages/VideoEditor'));
 const VerificationReportPage = lazy(() => import('./pages/VerificationReportPage'));
 const ProvenancePage = lazy(() => import('./pages/ProvenancePage'));
 const CampaignLabPage = lazy(() => import('./pages/CampaignLabPage'));
@@ -112,6 +113,7 @@ export default function App() {
           <Route path="ladder" element={<DraftLadder />} />
           <Route path="script" element={<ScriptEditor />} />
           <Route path="storyboard" element={<StoryboardEditor />} />
+          <Route path="editor" element={<VideoEditor />} />
           <Route path="verification" element={<VerificationReportPage />} />
           <Route path="lab" element={<CampaignLabPage />} />
           <Route path="provenance" element={<ProvenancePage />} />

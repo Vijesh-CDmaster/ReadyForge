@@ -383,7 +383,8 @@ export async function processRealProviderJob(
   project: IProject,
   contract: IProductionContract,
   leaseId: string,
-  providerOverride?: VideoProvider
+  providerOverride?: VideoProvider,
+  beforeSubmit?: () => Promise<void>
 ): Promise<void> {
   const provider = providerOverride ?? getVideoProvider(task.providerId);
   const authorization = await revalidateVideoJobAuthorization(task, project, contract);
@@ -403,6 +404,52 @@ export async function processRealProviderJob(
 
   let providerJobId = task.providerJobId;
   if (!providerJobId) {
+    if (beforeSubmit) await beforeSubmit();
+    const currentTask = await GenerationTask.findOne({
+      _id: task._id,
+      status: 'running',
+      leaseId,
+      leaseExpiresAt: { $gt: new Date() },
+      providerJobId: { $exists: false },
+    }).lean();
+    if (!currentTask) {
+      throw new VideoProviderError(
+        'provider_submission_authorization: The worker lease is no longer valid for provider submission.',
+        'validation',
+        false
+      );
+    }
+    const currentProject = await Project.findById(task.projectId);
+    const currentContract = await ProductionContract.findOne({
+      _id: task.contractId,
+      projectId: task.projectId,
+      version: task.contractVersion,
+      status: { $in: ['approved', 'locked'] },
+    });
+    if (!currentProject || !currentContract) {
+      throw new VideoProviderError(
+        'provider_submission_authorization: The captured project or Production Contract is no longer valid.',
+        'validation',
+        false
+      );
+    }
+    const currentAuthorization = await revalidateVideoJobAuthorization(currentTask, currentProject, currentContract);
+    if (!currentAuthorization.authorized) {
+      throw new VideoProviderError(
+        `provider_submission_authorization: ${authorizationMessage(currentAuthorization)}`,
+        'validation',
+        false
+      );
+    }
+    const currentAssets = await Asset.find({ projectId: currentProject._id, workspaceId: currentTask.workspaceId! });
+    const currentAssetIds = new Set(currentAssets.map((asset) => asset._id.toString()));
+    if (currentContract.approvedAssetIds.some((id) => !currentAssetIds.has(id.toString()))) {
+      throw new VideoProviderError(
+        'provider_submission_authorization: An approved input asset is no longer available.',
+        'validation',
+        false
+      );
+    }
     const submission = await provider.submit({
       prompt: task.inputPrompt,
       model: config.video.runwayModel,
@@ -546,9 +593,14 @@ async function processJob(task: IGenerationTask): Promise<void> {
         if (!(await heartbeat(task._id, leaseId, progress, stage))) {
           throw new MockProviderError('Worker lease was lost.', 'MOCK_RETRYABLE', true);
         }
-
       }
     );
+    if (task.budgetReservationId) {
+      await settleVideoBudget({
+        reservationId: task.budgetReservationId,
+        actualAmount: 0,
+      });
+    }
     const now = new Date();
     const completed = await GenerationTask.updateOne(
       { _id: task._id, status: 'running', leaseId, leaseExpiresAt: { $gt: now } },
@@ -569,7 +621,22 @@ async function processJob(task: IGenerationTask): Promise<void> {
         $unset: { leaseId: 1, leaseExpiresAt: 1, heartbeatAt: 1 },
       }
     );
-    if (completed.modifiedCount !== 1) return;
+    if (completed.modifiedCount !== 1) {
+      await GenerationTask.updateOne(
+        { _id: task._id, status: 'running', leaseId },
+        {
+          $set: {
+            status: 'failed',
+            errorCode: 'MOCK_SETTLEMENT_TASK_UPDATE_FAILED',
+            errorMessage: 'Mock output was settled, but the task could not be marked ready for review; manual reconciliation is required.',
+            currentStage: 'manual settlement reconciliation required',
+            completedAt: new Date(),
+          },
+          $unset: { leaseId: 1, leaseExpiresAt: 1, heartbeatAt: 1 },
+        }
+      );
+      return;
+    }
     audit({
       workspaceId: task.workspaceId!.toString(),
       projectId: task.projectId.toString(),

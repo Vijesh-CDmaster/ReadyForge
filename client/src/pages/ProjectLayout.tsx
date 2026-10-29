@@ -89,6 +89,7 @@ export default function ProjectLayout() {
         { to: `${base}/ladder`, label: 'Draft ladder' },
         { to: `${base}/script`, label: 'Script' },
         { to: `${base}/storyboard`, label: 'Storyboard' },
+        { to: `${base}/editor`, label: 'Video editor' },
         { to: `${base}/verification`, label: 'Verify' },
       ],
     },

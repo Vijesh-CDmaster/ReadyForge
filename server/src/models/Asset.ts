@@ -14,6 +14,8 @@ export interface IAsset {
   thumbnailUrl?: string;
   mimeType: string;
   sizeBytes: number;
+  /** Populated only by a trusted media-metadata pipeline; absent means unknown. */
+  sourceDurationSeconds?: number;
   licenseStatus: LicenseStatus;
   licenseType?: string;
   licenseOwner?: string;
@@ -42,6 +44,7 @@ const assetSchema = new Schema<IAsset>(
     thumbnailUrl: { type: String },
     mimeType: { type: String, default: '' },
     sizeBytes: { type: Number, default: 0 },
+    sourceDurationSeconds: { type: Number, min: 0 },
     licenseStatus: { type: String, enum: LICENSE_STATUSES, default: 'unknown', index: true },
     licenseType: { type: String, maxlength: 300 },
     licenseOwner: { type: String, maxlength: 300 },
