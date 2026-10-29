@@ -172,7 +172,7 @@ export default function SettingsPage() {
         }
       />
 
-      <Card className="grid gap-4 md:grid-cols-2">
+      <Card className="grid gap-4 p-5 md:grid-cols-2">
         <Field label="Workspace name">
           <Input
             value={form.name}
@@ -233,7 +233,7 @@ export default function SettingsPage() {
           title="Brand DNA Card"
           subtitle="Every generated script, storyboard and variant is screened against this card — banned words block verification."
         />
-        <Card className="grid gap-4 md:grid-cols-2">
+        <Card className="grid gap-4 p-5 md:grid-cols-2">
           <Field label="Brand name">
             <Input
               value={dna.brandName}

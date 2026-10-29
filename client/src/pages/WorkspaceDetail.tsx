@@ -152,7 +152,7 @@ export default function WorkspaceDetail() {
 
       {tab === 'overview' && (
         <div>
-          <div className="mb-5 grid gap-4 sm:grid-cols-3">
+          <div className="mb-5 grid gap-3 sm:grid-cols-3">
             <Card className="p-4">
               <p className="text-xs text-slate-500">Projects</p>
               <p className="text-2xl font-bold">{data.projects.length}</p>
@@ -178,7 +178,7 @@ export default function WorkspaceDetail() {
             <div className="grid gap-4 lg:grid-cols-2">
               {data.projects.map((p) => (
                 <Link key={p.id} to={`/app/projects/${p.id}`}>
-                  <Card className="p-4 transition hover:border-brand-400">
+                  <Card className="p-5 transition hover:border-brand-400">
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <h3 className="font-semibold">{p.title}</h3>

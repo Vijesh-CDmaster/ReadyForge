@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { HydratedDocument } from 'mongoose';
-import { requireAuth, AuthedRequest, requireProject } from '../middleware/auth';
+import { getAuthorizedProject, requireAuth, AuthedRequest, requireProject } from '../middleware/auth';
 import { asyncHandler, validateBody, ApiError } from '../http';
 import { audit, clientIp } from '../audit';
 import {
@@ -94,11 +94,10 @@ tasteRouter.get(
   asyncHandler(async (req: AuthedRequest, res) => {
     const projectId = typeof req.query.projectId === 'string' ? req.query.projectId : undefined;
     const user = await getUserProfile(req.user!._id, true);
-    const override = projectId ? await getProjectOverride(req.user!._id, projectId) : null;
     if (projectId) {
-      const project = await Project.findById(projectId);
-      if (!project) throw new ApiError(404, 'Project not found');
+      await getAuthorizedProject(req.user!, projectId);
     }
+    const override = projectId ? await getProjectOverride(req.user!._id, projectId) : null;
     res.json(serializeProfile(user, override, projectId));
   })
 );
@@ -324,6 +323,7 @@ tasteRouter.post(
     const body = validateBody(z.object({ scope: z.enum(['user', 'project']).default('user'), projectId: z.string().optional() }), req.body);
     if (body.scope === 'project') {
       if (!body.projectId) throw new ApiError(400, 'projectId is required for project reset');
+      await getAuthorizedProject(req.user!, body.projectId);
       await TasteProfile.deleteOne({ userId: req.user!._id, projectId: body.projectId });
       res.json({ ok: true, scope: 'project' });
       return;
@@ -378,8 +378,7 @@ tasteRouter.post(
     if (!preset) throw new ApiError(404, 'Preset not found');
 
     if (body.projectId) {
-      const project = await Project.findById(body.projectId);
-      if (!project) throw new ApiError(404, 'Project not found');
+      const { project } = await getAuthorizedProject(req.user!, body.projectId);
       let override = await getProjectOverride(req.user!._id, project._id);
       if (!override) override = await TasteProfile.create({ userId: req.user!._id, projectId: project._id });
       override.dna = mergeDna(override.dna as Record<string, any>, preset.dna) as never;

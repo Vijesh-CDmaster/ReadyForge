@@ -126,10 +126,10 @@ export default function ProjectLayout() {
         </div>
       </div>
 
-      <nav className="mb-5 flex gap-1 overflow-x-auto border-b border-slate-200 dark:border-slate-800" aria-label="Project sections">
+      <nav className="mb-5 flex gap-1 overflow-x-auto rounded-xl border border-slate-200 bg-white/70 p-1 shadow-sm dark:border-slate-800 dark:bg-slate-900/60" aria-label="Project sections">
         {tabGroups.map((group, gi) => (
           <div key={group.label} className="flex items-center gap-1">
-            {gi > 0 && <span className="mx-1 h-4 w-px shrink-0 bg-slate-200 dark:bg-slate-800" aria-hidden />}
+            {gi > 0 && <span className="mx-1 h-5 w-px shrink-0 bg-slate-200 dark:bg-slate-800" aria-hidden />}
             <span
               className="mr-1 hidden shrink-0 self-center text-[10px] font-semibold uppercase tracking-wider text-slate-400 xl:block"
               aria-hidden
@@ -143,9 +143,9 @@ export default function ProjectLayout() {
                 end={tab.end}
                 className={({ isActive }) =>
                   cx(
-                    'relative whitespace-nowrap rounded-t-md px-3 py-2 text-sm font-medium transition-colors',
+                    'relative whitespace-nowrap rounded-lg px-3 py-2 text-sm font-medium transition-colors',
                     isActive
-                      ? 'text-brand-700 after:absolute after:inset-x-0 after:-bottom-px after:h-0.5 after:bg-brand-600 dark:text-brand-300'
+                      ? 'bg-brand-50 text-brand-700 shadow-sm dark:bg-brand-500/15 dark:text-brand-300'
                       : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
                   )
                 }

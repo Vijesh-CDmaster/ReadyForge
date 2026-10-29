@@ -50,11 +50,7 @@ export default function AdminPage() {
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
-      <div className="flex items-center gap-2">
-        <ShieldCheck className="h-5 w-5 text-brand-600" aria-hidden />
-        <h1 className="text-xl font-semibold tracking-tight">Platform admin</h1>
-        <Badge tone="brand">admin only</Badge>
-      </div>
+      <SectionTitle title="Platform admin" subtitle="Read-only operational view of ReadyForge usage and audit activity." action={<Badge tone="brand"><ShieldCheck className="h-3 w-3" /> admin only</Badge>} />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {cards.map((c) => (

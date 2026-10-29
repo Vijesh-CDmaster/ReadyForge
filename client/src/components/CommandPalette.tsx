@@ -27,15 +27,18 @@ export function CommandPalette(props: {
   const [cursor, setCursor] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (props.open) {
+      previouslyFocused.current = document.activeElement as HTMLElement | null;
       setQuery('');
       setCursor(0);
       // Focus after paint so the animated panel is interactive immediately.
       const t = requestAnimationFrame(() => inputRef.current?.focus());
       return () => cancelAnimationFrame(t);
     }
+    previouslyFocused.current?.focus();
   }, [props.open]);
 
   const commands = useMemo<Command[]>(() => {
@@ -110,6 +113,19 @@ export function CommandPalette(props: {
         if (cmd) {
           props.onClose();
           navigate(cmd.to);
+        }
+      } else if (e.key === 'Tab') {
+        const dialog = document.querySelector<HTMLElement>('[aria-label="Command palette"]');
+        const items = dialog
+          ? Array.from(dialog.querySelectorAll<HTMLElement>('input, button, [href], [tabindex]:not([tabindex="-1"])')).filter(
+              (el) => !el.hasAttribute('disabled')
+            )
+          : [];
+        if (items.length) {
+          e.preventDefault();
+          const current = items.indexOf(document.activeElement as HTMLElement);
+          const next = e.shiftKey ? (current - 1 + items.length) % items.length : (current + 1) % items.length;
+          items[next].focus();
         }
       }
     };

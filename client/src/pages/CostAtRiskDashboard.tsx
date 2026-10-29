@@ -88,10 +88,11 @@ export default function CostAtRiskDashboard() {
       />
 
       {/* Headline */}
-      <Card className={risky ? 'border-rose-300 p-6 dark:border-rose-900' : 'border-emerald-300 p-6 dark:border-emerald-900'}>
-        <div className="flex flex-wrap items-center gap-3">
+      <Card className={risky ? 'border-rose-300 bg-rose-50/30 p-6 dark:border-rose-900 dark:bg-rose-950/10' : 'border-emerald-300 bg-emerald-50/30 p-6 dark:border-emerald-900 dark:bg-emerald-950/10'}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <Calculator className={risky ? 'h-6 w-6 text-rose-500' : 'h-6 w-6 text-emerald-500'} />
           <Badge tone={risky ? 'danger' : 'success'}>estimate — not a guarantee</Badge>
+        <span className="text-xs font-medium text-slate-500">Next stage: {data.nextStage}</span>
         </div>
         <p className={'mt-3 text-lg font-semibold leading-relaxed ' + (risky ? 'text-rose-700 dark:text-rose-300' : 'text-emerald-700 dark:text-emerald-300')}>
           Rendering now: {pct}% chance of rework. {data.currency} {data.estimatedLoss.toLocaleString('en-IN')} at risk on{' '}

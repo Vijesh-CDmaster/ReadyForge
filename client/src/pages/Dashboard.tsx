@@ -1,6 +1,6 @@
 import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Plus, FolderKanban, Users, AlertTriangle, ArrowRight, Flame } from 'lucide-react';
+import { Plus, FolderKanban, Users, AlertTriangle, ArrowRight, Flame, Activity, Sparkles } from 'lucide-react';
 import { api } from '../lib/api';
 import { useAuthStore } from '../store/auth';
 import { Button, Card, EmptyState, SkeletonCard, SectionTitle, Badge, ErrorBox } from '../components/ui';
@@ -67,10 +67,10 @@ export default function Dashboard() {
   const ready = (projects || []).filter((p) => p.status === 'ready' || p.readinessScore >= 75);
 
   return (
-    <div className="mx-auto max-w-6xl">
+    <div className="mx-auto max-w-6xl space-y-6">
       <SectionTitle
         title={`Welcome${user ? `, ${user.name.split(' ')[0]}` : ''}`}
-        subtitle="Do not generate until the project is ready."
+        subtitle="A clear view of what is ready, what is blocked, and what to do next."
         action={
           <div className="flex gap-2">
             <Button
@@ -98,20 +98,43 @@ export default function Dashboard() {
 
       {error && <ErrorBox error={error} className="mb-4" />}
 
-      {/* KPI strip — only metrics backed by real project data */}
-      <div className="mb-6 grid gap-4 sm:grid-cols-3">
-        <Kpi label="Projects" value={projects?.length ?? 0} icon={<FolderKanban className="h-4 w-4" />} />
-        <Kpi label="Ready to generate" value={ready.length} icon={<ArrowRight className="h-4 w-4" />} tone="success" />
-        <Kpi label="Needs attention" value={blocked.length} icon={<AlertTriangle className="h-4 w-4" />} tone="danger" />
+      <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-brand-600 to-indigo-700 p-5 text-white shadow-lg shadow-brand-900/10 dark:border-brand-500/30 dark:from-brand-950 dark:to-slate-900">
+        <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="max-w-xl">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-brand-100">
+              <Sparkles className="h-3.5 w-3.5" aria-hidden /> Production control center
+            </div>
+            <h2 className="mt-2 text-xl font-semibold tracking-tight">Make the next decision with confidence.</h2>
+            <p className="mt-1.5 text-sm leading-relaxed text-brand-100">
+              ReadyForge keeps inputs, approvals, rights, and budget risk visible before anything enters production.
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-3 rounded-xl border border-white/15 bg-white/10 px-4 py-3 backdrop-blur">
+            <Activity className="h-5 w-5 text-brand-100" aria-hidden />
+            <div>
+              <p className="text-2xl font-bold tabular-nums">{ready.length}/{projects?.length ?? 0}</p>
+              <p className="text-xs text-brand-100">projects ready</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Kpi label="Projects in workspace" value={projects?.length ?? 0} icon={<FolderKanban className="h-4 w-4" />} detail="Across all workspaces" />
+        <Kpi label="Ready to generate" value={ready.length} icon={<ArrowRight className="h-4 w-4" />} tone="success" detail="Passed the readiness threshold" />
+        <Kpi label="Needs attention" value={blocked.length} icon={<AlertTriangle className="h-4 w-4" />} tone="danger" detail="Open blockers or low score" />
       </div>
 
       {/* What is preventing production? → direct path to each project's blockers */}
       {blocked.length > 0 && (
-        <Card className="mb-6 border-rose-200 p-4 dark:border-rose-900/60">
-          <div className="mb-2 flex items-center gap-2">
+        <Card className="border-rose-200 p-5 dark:border-rose-900/60">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
             <AlertTriangle className="h-4 w-4 text-rose-500" aria-hidden />
             <h2 className="text-sm font-semibold">Blocking production</h2>
             <Badge tone="danger">{blocked.length} project{blocked.length === 1 ? '' : 's'}</Badge>
+            </div>
+            <span className="text-xs text-slate-500">Resolve these before generating</span>
           </div>
           <ul className="divide-y divide-slate-100 dark:divide-slate-800">
             {blocked.map((p) => (
@@ -134,7 +157,14 @@ export default function Dashboard() {
       )}
 
       {/* Workspaces */}
-      <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <section>
+        <div className="mb-3 flex items-end justify-between">
+          <div>
+            <h2 className="text-sm font-semibold">Your workspaces</h2>
+            <p className="mt-0.5 text-xs text-slate-500">Jump into a team’s projects and settings.</p>
+          </div>
+        </div>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {workspaces.map((ws) => (
           <Link key={ws.id} to={`/app/workspaces/${ws.id}`}>
             <Card className="p-4 transition hover:border-brand-400">
@@ -152,9 +182,17 @@ export default function Dashboard() {
           </Card>
         </Link>
       </div>
+      </section>
 
       {/* Projects */}
-      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-slate-400">Projects</h2>
+      <section>
+      <div className="mb-3 flex items-end justify-between">
+        <div>
+          <h2 className="text-sm font-semibold">Recent projects</h2>
+          <p className="mt-0.5 text-xs text-slate-500">Monitor readiness and move work forward.</p>
+        </div>
+        <Link to="/app/projects/new" className="text-xs font-medium text-brand-600 hover:text-brand-700 dark:text-brand-300">View all actions →</Link>
+      </div>
       {!projects?.length ? (
         <EmptyState
           icon={<FolderKanban className="h-8 w-8" />}
@@ -197,6 +235,7 @@ export default function Dashboard() {
           ))}
         </div>
       )}
+      </section>
     </div>
   );
 }
@@ -219,11 +258,13 @@ function Kpi({
   value,
   icon,
   tone = 'brand',
+  detail,
 }: {
   label: string;
   value: number;
   icon: React.ReactNode;
   tone?: 'brand' | 'success' | 'danger';
+  detail?: string;
 }) {
   const tones = {
     brand: 'bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-300',
@@ -236,6 +277,7 @@ function Kpi({
       <div>
         <p className="text-xl font-bold tabular-nums">{value}</p>
         <p className="text-xs text-slate-500">{label}</p>
+        {detail && <p className="mt-0.5 text-[10px] text-slate-400">{detail}</p>}
       </div>
     </Card>
   );

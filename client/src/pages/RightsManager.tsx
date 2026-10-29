@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ShieldCheck, ShieldAlert, Scale, BellRing } from 'lucide-react';
 import { api } from '../lib/api';
-import { Badge, Button, Card, ErrorBox, Field, Input, Loading, Select, cx } from '../components/ui';
+import { Badge, Button, Card, ErrorBox, Field, Input, Loading, Select, SectionTitle, cx } from '../components/ui';
 import { toast } from '../store/toast';
 import { useProject } from './ProjectLayout';
 
@@ -123,7 +123,12 @@ export default function RightsManager() {
   const assets = data || [];
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
+      <SectionTitle
+        title="Rights & licence manager"
+        subtitle="Document permissions and verify every asset before it enters final production."
+        action={<Badge tone={assets.length && assets.every((a) => a.licenseStatus === 'owned' || a.licenseStatus === 'licensed') ? 'success' : 'warning'}>{assets.length} assets tracked</Badge>}
+      />
       <Card className="flex flex-wrap items-center gap-3 border-amber-200 bg-amber-50/60 p-4 dark:border-amber-900 dark:bg-amber-950/30">
         <Scale className="h-5 w-5 shrink-0 text-amber-600" />
         <p className="text-sm text-amber-800 dark:text-amber-200">
@@ -166,7 +171,7 @@ export default function RightsManager() {
           {assets.map((a) => {
             const report = reports[a.id];
             return (
-              <Card key={a.id} className="p-4">
+              <Card key={a.id} className="p-5 transition hover:border-brand-300 dark:hover:border-brand-700">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="flex items-center gap-2">
                     <ShieldCheck className={cx('h-4 w-4', a.licenseStatus === 'owned' || a.licenseStatus === 'licensed' ? 'text-emerald-500' : 'text-rose-500')} />

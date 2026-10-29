@@ -344,6 +344,11 @@ export default function CampaignLabPage() {
 
   return (
     <div className="space-y-8">
+      <SectionTitle
+        title="Campaign Lab"
+        subtitle="Test audience response, creative directions, and controlled experiments before committing production budget."
+        action={<Badge tone="brand"><Sparkles className="h-3 w-3" /> Intelligence workspace</Badge>}
+      />
       {/* ---------- Pre-Flight Performance Forecast ---------- */}
       <ForecastSection projectId={project.id} />
 

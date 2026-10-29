@@ -157,9 +157,7 @@ export default function GettingStarted() {
   if (!focus) {
     return (
       <div className="mx-auto max-w-3xl space-y-6">
-        <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
-          <Rocket className="h-5 w-5 text-brand-600" aria-hidden /> Getting started
-        </h1>
+        <SectionTitle title="Getting started" subtitle="Follow the real ReadyForge production loop from brief to provenance." action={<Rocket className="h-5 w-5 text-brand-600" aria-hidden />} />
         <EmptyState
           icon={<Rocket className="h-8 w-8" />}
           title="Create your first campaign to begin the tour"
@@ -187,9 +185,12 @@ export default function GettingStarted() {
       />
 
       <Card className="p-5">
-        <p className="mb-4 text-sm text-slate-500">
+        <div className="mb-4 flex items-center justify-between gap-3">
+        <p className="text-sm text-slate-500">
           Following <strong>{d?.title || focus.title}</strong> — switch campaigns by opening one first.
         </p>
+        <Badge tone="neutral">{focus.currentStage}</Badge>
+        </div>
         <ol className="space-y-2">
           {steps.map((s, i) => {
             const current = i === firstPending;

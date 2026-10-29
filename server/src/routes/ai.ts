@@ -1,15 +1,14 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import rateLimit from 'express-rate-limit';
-import { requireAuth, AuthedRequest } from '../middleware/auth';
-import { asyncHandler, validateBody, ApiError } from '../http';
+import { getAuthorizedProject, requireAuth, AuthedRequest } from '../middleware/auth';
+import { asyncHandler, validateBody } from '../http';
 import { audit, clientIp } from '../audit';
 import { classifyProject } from '../ai/classify';
 import { generateQuestions } from '../ai/questions';
 import { verifyClaims } from '../ai/claims';
 import { adaptiveQuestionCount } from '../ai/taste';
 import { TasteProfile } from '../models/TasteProfile';
-import { Project } from '../models/Project';
 import { KnowledgeInput } from '../models/KnowledgeInput';
 
 export const aiRouter = Router();
@@ -40,13 +39,7 @@ aiRouter.post(
   aiLimiter,
   asyncHandler(async (req: AuthedRequest, res) => {
     const body = validateBody(z.object({ projectId: z.string().min(1), count: z.number().min(1).max(6).optional() }), req.body);
-    const project = await Project.findById(body.projectId);
-    if (!project) throw new ApiError(404, 'Project not found');
-
-    const { Workspace } = await import('../models/Workspace');
-    const ws = await Workspace.findById(project.workspaceId);
-    const member = ws?.members.find((m) => m.userId.toString() === req.user!._id.toString() && m.status === 'active');
-    if (!member && req.user!.platformRole !== 'admin') throw new ApiError(403, 'Not a member of this project workspace');
+    const { project } = await getAuthorizedProject(req.user!, body.projectId);
 
     const inputs = await KnowledgeInput.find({ projectId: project._id });
 
@@ -90,9 +83,7 @@ aiRouter.post(
       z.object({ projectId: z.string().min(1), content: z.string().min(10).max(20000) }),
       req.body
     );
-    const project = await Project.findById(body.projectId);
-    if (!project) throw new ApiError(404, 'Project not found');
-
+    const { project } = await getAuthorizedProject(req.user!, body.projectId);
     const inputs = await KnowledgeInput.find({ projectId: project._id });
     const approvedFacts = inputs.filter(
       (i) => i.status === 'approved' && (i.type === 'fact' || i.type === 'price' || i.type === 'claim')

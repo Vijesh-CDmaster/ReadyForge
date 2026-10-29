@@ -71,7 +71,7 @@ export default function ScriptEditor() {
         subtitle={`Contract v${data.contract.version} · ${data.contract.status}. Manual edits are audit-logged; regeneration on the ladder overwrites the script.`}
       />
 
-      <div className="flex items-center gap-2">
+      <Card className="flex flex-wrap items-center gap-2 p-3">
         {dirty ? (
           <Badge tone="warning">Unsaved changes</Badge>
         ) : (
@@ -89,10 +89,10 @@ export default function ScriptEditor() {
             {save.isPending ? 'Saving…' : 'Save script'}
           </Button>
         </div>
-      </div>
+      </Card>
 
       {beats.length > 0 && (
-        <Card>
+        <Card className="p-5">
           <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Outline beats</p>
           <ol className="list-inside list-decimal space-y-1 text-sm text-slate-600 dark:text-slate-300">
             {beats.map((b) => (
@@ -102,6 +102,7 @@ export default function ScriptEditor() {
         </Card>
       )}
 
+      <Card className="p-5">
       <Field label="Script" hint="Blocks separated by blank lines: [SCENE n — beat], VISUAL:, VO:, DURATION:">
         <Textarea
           rows={24}
@@ -114,6 +115,7 @@ export default function ScriptEditor() {
           className="font-mono text-xs"
         />
       </Field>
+      </Card>
     </div>
   );
 }

@@ -87,6 +87,27 @@ export function requireRole(...roles: WorkspaceRole[]) {
   };
 }
 
+export async function getAuthorizedProject(
+  user: HydratedDocument<IUser>,
+  projectId: unknown
+): Promise<{
+  project: HydratedDocument<IProject>;
+  workspace: HydratedDocument<IWorkspace>;
+  membershipRole?: WorkspaceRole;
+}> {
+  const project = await Project.findById(projectId);
+  if (!project) throw new ApiError(404, 'Project not found');
+  const workspace = await Workspace.findById(project.workspaceId);
+  if (!workspace) throw new ApiError(404, 'Workspace not found');
+  const membership = workspace.members.find(
+    (m) => m.userId.toString() === user._id.toString() && m.status === 'active'
+  );
+  if (!membership && user.platformRole !== 'admin') {
+    throw new ApiError(403, 'You are not a member of this project workspace');
+  }
+  return { project, workspace, membershipRole: membership?.role };
+}
+
 /**
  * Reads :id (project id), verifies the user's workspace membership, attaches project.
  * Optionally restricts to workspace roles (owner always allowed).
@@ -95,17 +116,7 @@ export function requireProject(...roles: WorkspaceRole[]) {
   return async (req: AuthedRequest, _res: Response, next: NextFunction) => {
     try {
       if (!req.user) throw new ApiError(401, 'Authentication required');
-      const project = await Project.findById(req.params.id);
-      if (!project) throw new ApiError(404, 'Project not found');
-      const workspace = await Workspace.findById(project.workspaceId);
-      if (!workspace) throw new ApiError(404, 'Workspace not found');
-      const membership = workspace.members.find(
-        (m) => m.userId.toString() === req.user!._id.toString() && m.status === 'active'
-      );
-      if (!membership && req.user.platformRole !== 'admin') {
-        throw new ApiError(403, 'You are not a member of this project workspace');
-      }
-      const role = membership?.role;
+      const { project, workspace, membershipRole: role } = await getAuthorizedProject(req.user, req.params.id);
       if (roles.length > 0 && role !== 'owner' && !(role && roles.includes(role))) {
         throw new ApiError(403, `Requires one of roles: ${roles.join(', ')}`);
       }

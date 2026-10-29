@@ -2,7 +2,7 @@ import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Bell, CheckCheck, Inbox } from 'lucide-react';
 import { api } from '../lib/api';
-import { Badge, Button, Card, ErrorBox, Loading, cx } from '../components/ui';
+import { Badge, Button, Card, ErrorBox, Loading, SectionTitle, cx } from '../components/ui';
 import { toast } from '../store/toast';
 
 interface NotificationRow {
@@ -46,17 +46,19 @@ export default function NotificationsPage() {
   const items = data?.notifications || [];
 
   return (
-    <div className="mx-auto max-w-3xl space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Bell className="h-5 w-5 text-slate-400" />
-          <h1 className="text-lg font-semibold">Notifications</h1>
-          {(data?.unread ?? 0) > 0 && <Badge tone="danger">{data!.unread} unread</Badge>}
-        </div>
-        <Button variant="outline" size="sm" onClick={() => markAll.mutate()} loading={markAll.isPending}>
+    <div className="mx-auto max-w-3xl space-y-5">
+      <SectionTitle
+        title="Notifications"
+        subtitle="Approval requests, assignments, generation results, and workspace activity."
+        action={
+          <div className="flex items-center gap-2">
+            {(data?.unread ?? 0) > 0 && <Badge tone="danger">{data!.unread} unread</Badge>}
+            <Button variant="outline" size="sm" onClick={() => markAll.mutate()} loading={markAll.isPending}>
           <CheckCheck className="h-3.5 w-3.5" /> Mark all read
-        </Button>
-      </div>
+            </Button>
+          </div>
+        }
+      />
 
       {items.length === 0 ? (
         <Card className="flex flex-col items-center px-6 py-14 text-center">

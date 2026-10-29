@@ -98,17 +98,17 @@ export const Select = React.forwardRef<HTMLSelectElement, React.SelectHTMLAttrib
 
 /* ---------------- Surfaces ---------------- */
 export function Card(props: { children: React.ReactNode; className?: string }) {
-  return <div className={cx('card', props.className)}>{props.children}</div>;
+  return <div className={cx('card shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:shadow-black/20', props.className)}>{props.children}</div>;
 }
 
 export function SectionTitle(props: { title: string; subtitle?: string; action?: React.ReactNode }) {
   return (
-    <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+    <div className="mb-5 flex flex-wrap items-end justify-between gap-4">
       <div>
-        <h2 className="text-lg font-semibold tracking-tight">{props.title}</h2>
+        <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{props.title}</h1>
         {props.subtitle && <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">{props.subtitle}</p>}
       </div>
-      {props.action}
+      {props.action && <div className="flex flex-wrap items-center gap-2">{props.action}</div>}
     </div>
   );
 }
@@ -347,6 +347,7 @@ export function Dropdown(props: {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const wasOpen = useRef(false);
   const skipRestoreFocus = useRef(false);
 
@@ -361,6 +362,9 @@ export function Dropdown(props: {
       return;
     }
     wasOpen.current = true;
+    const focusFirstItem = requestAnimationFrame(() => {
+      menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+    });
     const onPointerDown = (e: PointerEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         skipRestoreFocus.current = true;
@@ -368,13 +372,34 @@ export function Dropdown(props: {
       }
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setOpen(false);
+        return;
+      }
+      if (!menuRef.current || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+      const items = Array.from(menuRef.current.querySelectorAll<HTMLElement>('[role="menuitem"]')).filter(
+        (item) => !item.hasAttribute('disabled')
+      );
+      if (!items.length) return;
+      e.preventDefault();
+      const current = items.indexOf(document.activeElement as HTMLElement);
+      const next =
+        e.key === 'Home'
+          ? 0
+          : e.key === 'End'
+            ? items.length - 1
+            : e.key === 'ArrowUp'
+              ? (current - 1 + items.length) % items.length
+              : (current + 1) % items.length;
+      items[next].focus();
     };
     document.addEventListener('pointerdown', onPointerDown);
     document.addEventListener('keydown', onKeyDown);
     return () => {
       document.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('keydown', onKeyDown);
+      cancelAnimationFrame(focusFirstItem);
     };
   }, [open]);
 
@@ -396,6 +421,7 @@ export function Dropdown(props: {
       </button>
       {open && (
         <div
+          ref={menuRef}
           role="menu"
           aria-label={props.label}
           className={cx(

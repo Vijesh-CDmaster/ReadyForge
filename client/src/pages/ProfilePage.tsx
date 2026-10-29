@@ -139,7 +139,7 @@ export default function ProfilePage() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
-      <div className="flex items-center gap-3">
+      <Card className="flex items-center gap-3 border-brand-200/70 bg-brand-50/30 p-5 dark:border-brand-500/20 dark:bg-brand-950/10">
         <span className="flex h-12 w-12 items-center justify-center rounded-full bg-brand-100 text-brand-700 dark:bg-brand-500/20 dark:text-brand-300">
           <User className="h-6 w-6" aria-hidden />
         </span>
@@ -150,7 +150,7 @@ export default function ProfilePage() {
             <Badge tone={user.platformRole === 'admin' ? 'brand' : 'neutral'}>{user.platformRole}</Badge>
           </div>
         </div>
-      </div>
+      </Card>
 
       {/* -------- profile -------- */}
       <Card className="p-5">

@@ -45,10 +45,13 @@ export default function CreateWorkspace() {
 
   return (
     <div className="mx-auto max-w-xl">
-      <h1 className="text-xl font-semibold">Create workspace</h1>
+      <div className="mb-5">
+      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-brand-600 dark:text-brand-300">Workspace setup</p>
+      <h1 className="mt-1 text-2xl font-semibold tracking-tight">Create workspace</h1>
       <p className="mt-1 text-sm text-slate-500">
         Workspaces hold your team, brand rules, assets and projects. Each member gets a role.
       </p>
+      </div>
 
       <Card className="mt-5 p-6">
         <form onSubmit={onSubmit} noValidate>

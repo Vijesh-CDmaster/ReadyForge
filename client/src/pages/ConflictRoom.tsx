@@ -15,6 +15,7 @@ import {
 import { ConflictCard, AiSourceBadge } from '../components/widgets';
 import { toast } from '../store/toast';
 import { useProject } from './ProjectLayout';
+import { SectionTitle } from '../components/ui';
 
 interface Recommendation {
   optionA: { id: string; content: string; creatorRole: string | null } | null;
@@ -144,8 +145,12 @@ export default function ConflictRoom() {
 
   return (
     <div className="space-y-5">
+      <SectionTitle
+        title="Conflict Room"
+        subtitle="Resolve contradictions before they become expensive production decisions."
+      />
       {/* Toolbar */}
-      <Card className="flex flex-wrap items-center justify-between gap-3 p-4">
+      <Card className="flex flex-wrap items-center justify-between gap-3 border-brand-200/70 bg-brand-50/30 p-4 dark:border-brand-500/20 dark:bg-brand-950/10">
         <div className="flex items-center gap-3">
           <GitMerge className="h-5 w-5 text-brand-500" />
           <div>

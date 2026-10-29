@@ -198,7 +198,7 @@ export default function ProvenancePage() {
           { label: 'Approved facts', value: String(data.totals.approvedFacts), icon: BadgeCheck },
           { label: 'Conflicts resolved', value: String(data.totals.conflictsResolved), icon: Flag },
         ].map((tile) => (
-          <Card key={tile.label} className="flex items-center gap-3">
+          <Card key={tile.label} className="flex items-center gap-3 p-4">
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-50 text-brand-600 dark:bg-brand-950 dark:text-brand-300">
               <tile.icon className="h-4 w-4" />
             </span>

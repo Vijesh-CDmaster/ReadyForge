@@ -68,7 +68,7 @@ const axisStyle = { fontSize: 11, fill: '#94a3b8' };
 
 function StatCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
-    <Card>
+    <Card className="p-4">
       <p className="text-xs uppercase tracking-wide text-slate-500">{label}</p>
       <p className="mt-1 text-2xl font-semibold tabular-nums">{value}</p>
       {hint && <p className="mt-0.5 text-xs text-slate-500">{hint}</p>}
@@ -107,7 +107,7 @@ export default function AnalyticsPage() {
     <div className="space-y-6">
       <SectionTitle
         title="Analytics"
-        subtitle="Workspace-wide performance: readiness, AI spend, regeneration and conflicts."
+        subtitle="Workspace-wide performance across readiness, AI spend, regeneration, and conflicts."
       />
 
       {/* KPI row */}
@@ -128,8 +128,11 @@ export default function AnalyticsPage() {
 
       <div className="grid gap-5 lg:grid-cols-3">
         {/* spend over time */}
-        <Card className="lg:col-span-2">
-          <p className="mb-3 text-sm font-semibold">AI spend & generations (last 14 days)</p>
+        <Card className="p-5 lg:col-span-2">
+          <div className="mb-4">
+            <p className="text-base font-semibold tracking-tight">AI spend & generations</p>
+            <p className="mt-0.5 text-xs text-slate-500">Last 14 days of model usage and generation volume.</p>
+          </div>
           <div className="h-56">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={data.ai.spendByDay} margin={{ top: 4, right: 8, bottom: 0, left: -18 }}>
@@ -145,8 +148,8 @@ export default function AnalyticsPage() {
         </Card>
 
         {/* project status pie */}
-        <Card>
-          <p className="mb-3 text-sm font-semibold">Projects by status</p>
+        <Card className="p-5">
+          <p className="text-base font-semibold tracking-tight">Projects by status</p>
           <div className="h-56">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
@@ -172,8 +175,8 @@ export default function AnalyticsPage() {
 
       <div className="grid gap-5 lg:grid-cols-2">
         {/* conflict types */}
-        <Card>
-          <p className="mb-3 text-sm font-semibold">Conflicts by type</p>
+        <Card className="p-5">
+          <p className="text-base font-semibold tracking-tight">Conflicts by type</p>
           {conflictData.length === 0 ? (
             <EmptyState title="No conflicts recorded" description="Run conflict detection from the Conflict Room." />
           ) : (
@@ -195,8 +198,8 @@ export default function AnalyticsPage() {
         </Card>
 
         {/* model performance */}
-        <Card>
-          <p className="mb-3 text-sm font-semibold">Model performance</p>
+        <Card className="p-5">
+          <p className="text-base font-semibold tracking-tight">Model performance</p>
           {data.ai.modelPerformance.length === 0 ? (
             <EmptyState title="No AI calls yet" description="Generate a rung on the Draft Ladder to populate this table." />
           ) : (

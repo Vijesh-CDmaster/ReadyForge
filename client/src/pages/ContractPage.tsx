@@ -154,6 +154,7 @@ export default function ContractPage() {
   }
 
   const allApproved = contract.requiredApprovals.length > 0 && contract.requiredApprovals.every((a) => a.status === 'approved');
+  const approvedCount = contract.requiredApprovals.filter((a) => a.status === 'approved').length;
 
   return (
     <div className="space-y-5">
@@ -185,6 +186,12 @@ export default function ContractPage() {
           </div>
         }
       />
+
+      <div className="grid gap-3 sm:grid-cols-3">
+        <ContractStat label="Gate status" value={contract.blockers.length ? 'Blocked' : contract.status.replace('_', ' ')} tone={contract.blockers.length ? 'danger' : contract.status === 'approved' ? 'success' : 'warning'} />
+        <ContractStat label="Approvals" value={`${approvedCount}/${contract.requiredApprovals.length}`} tone={allApproved ? 'success' : 'warning'} />
+        <ContractStat label="Claims & assets" value={`${contract.approvedClaimIds.length + contract.approvedAssetIds.length}`} tone="brand" />
+      </div>
 
       {/* Blockers banner */}
       {contract.blockers.length > 0 && (
@@ -433,6 +440,7 @@ export default function ContractPage() {
             </Button>
           </>
         }
+
       >
         <p className="mb-3 text-sm text-slate-600 dark:text-slate-400">
           {decision === 'approve'
@@ -457,5 +465,14 @@ function Item({ label, value, wide }: { label: string; value?: string; wide?: bo
       <dt className="text-xs font-medium uppercase tracking-wider text-slate-400">{label}</dt>
       <dd className={`mt-0.5 text-sm ${value ? '' : 'italic text-slate-400'}`}>{value || 'Not set'}</dd>
     </div>
+  );
+}
+
+function ContractStat({ label, value, tone }: { label: string; value: string; tone: 'success' | 'warning' | 'danger' | 'brand' }) {
+  return (
+    <Card className="flex items-center justify-between gap-3 p-4">
+      <span className="text-xs font-medium uppercase tracking-wider text-slate-400">{label}</span>
+      <Badge tone={tone}>{value}</Badge>
+    </Card>
   );
 }

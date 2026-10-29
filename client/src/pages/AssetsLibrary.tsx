@@ -1,8 +1,8 @@
 import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { UploadCloud, Trash2, FileImage } from 'lucide-react';
+import { UploadCloud, Trash2, FileImage, FolderOpen, ShieldCheck } from 'lucide-react';
 import { api } from '../lib/api';
-import { Badge, Button, Card, ErrorBox, Loading } from '../components/ui';
+import { Badge, Button, Card, ErrorBox, Loading, SectionTitle } from '../components/ui';
 import { toast } from '../store/toast';
 import { useProject } from './ProjectLayout';
 
@@ -87,9 +87,24 @@ export default function AssetsLibrary() {
 
   const assets = data || [];
   const tasteMatches = tasteRecs?.recommendations.slice(0, 3) ?? [];
+  const cleared = assets.filter((a) => a.licenseStatus === 'owned' || a.licenseStatus === 'licensed').length;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
+      <SectionTitle
+        title="Assets library"
+        subtitle="Centralise the files your project can safely use in production."
+        action={
+          <Button size="sm" onClick={() => fileInput.current?.click()} loading={upload.isPending}>
+            <UploadCloud className="h-3.5 w-3.5" /> Upload asset
+          </Button>
+        }
+      />
+      <div className="grid gap-3 sm:grid-cols-3">
+        <AssetStat label="Total assets" value={String(assets.length)} icon={<FolderOpen className="h-4 w-4" />} />
+        <AssetStat label="Rights documented" value={`${cleared}/${assets.length}`} icon={<ShieldCheck className="h-4 w-4" />} tone="success" />
+        <AssetStat label="Needs review" value={String(assets.filter((a) => a.licenseStatus !== 'owned' && a.licenseStatus !== 'licensed').length)} icon={<FileImage className="h-4 w-4" />} tone="warning" />
+      </div>
       {tasteMatches.length > 0 && (
         <Card className="border-brand-200 bg-brand-50/40 p-4 dark:border-brand-500/25 dark:bg-brand-500/5">
           <p className="text-xs font-semibold uppercase tracking-wider text-brand-700 dark:text-brand-300">
@@ -113,13 +128,11 @@ export default function AssetsLibrary() {
       )}
 
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <h2 className="text-base font-semibold">Assets Library</h2>
-          <Badge tone="neutral">{assets.length} files</Badge>
+        <div>
+          <h2 className="text-base font-semibold">Project files</h2>
+          <p className="mt-0.5 text-xs text-slate-500">Upload first, then document rights before final generation.</p>
         </div>
-        <Button size="sm" onClick={() => fileInput.current?.click()} loading={upload.isPending}>
-          <UploadCloud className="h-3.5 w-3.5" /> Upload
-        </Button>
+        <Badge tone="neutral">{assets.length} files</Badge>
         <input
           ref={fileInput}
           type="file"
@@ -169,8 +182,8 @@ export default function AssetsLibrary() {
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {assets.map((a) => (
-            <Card key={a.id} className="overflow-hidden">
-              <div className="flex h-32 items-center justify-center bg-slate-100 dark:bg-slate-800">
+            <Card key={a.id} className="group overflow-hidden transition hover:-translate-y-0.5 hover:border-brand-300 dark:hover:border-brand-700">
+              <div className="flex h-36 items-center justify-center bg-slate-100 dark:bg-slate-800">
                 {a.thumbnailUrl ? (
                   <img
                     src={a.fileUrl}
@@ -209,5 +222,19 @@ export default function AssetsLibrary() {
         </div>
       )}
     </div>
+  );
+}
+
+function AssetStat({ label, value, icon, tone = 'brand' }: { label: string; value: string; icon: React.ReactNode; tone?: 'brand' | 'success' | 'warning' }) {
+  const styles = {
+    brand: 'bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-300',
+    success: 'bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300',
+    warning: 'bg-amber-50 text-amber-600 dark:bg-amber-500/15 dark:text-amber-300',
+  };
+  return (
+    <Card className="flex items-center gap-3 p-4">
+      <span className={`flex h-8 w-8 items-center justify-center rounded-lg ${styles[tone]}`}>{icon}</span>
+      <div><p className="text-xl font-semibold tabular-nums">{value}</p><p className="text-xs text-slate-500">{label}</p></div>
+    </Card>
   );
 }

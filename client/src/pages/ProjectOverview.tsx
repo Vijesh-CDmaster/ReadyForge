@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Pencil, ShieldAlert, CheckCircle2, Clock } from 'lucide-react';
+import { Pencil, ShieldAlert, CheckCircle2, Clock, UsersRound, Database, WalletCards } from 'lucide-react';
 import { api } from '../lib/api';
 import { Button, Card, ErrorBox, Field, Input, Loading, Modal, SectionTitle, Textarea, Badge } from '../components/ui';
 import { ReadinessMeter, CostAtRiskCard, StatusBadge } from '../components/widgets';
@@ -108,6 +108,13 @@ export default function ProjectOverview() {
   const blockers = readiness?.blockingIssues || [];
 
   return (
+    <div className="space-y-5">
+      <div className="grid gap-3 sm:grid-cols-3">
+        <SummaryStat label="Readiness" value={`${Math.round(readiness?.score ?? project.readinessScore)}/100`} detail={blockers.length ? `${blockers.length} blocker${blockers.length === 1 ? '' : 's'} open` : 'No blockers detected'} icon={<CheckCircle2 className="h-4 w-4" />} tone={blockers.length ? 'warning' : 'success'} />
+        <SummaryStat label="Budget remaining" value={`${project.budget.currency} ${project.budget.remaining.toLocaleString('en-IN')}`} detail={`of ${project.budget.amount.toLocaleString('en-IN')} planned`} icon={<WalletCards className="h-4 w-4" />} />
+        <SummaryStat label="Project inputs" value={`${Object.values(project.inputCounts || {}).reduce((a, b) => a + b, 0)}`} detail={`${project.members.length} team member${project.members.length === 1 ? '' : 's'}`} icon={<Database className="h-4 w-4" />} />
+      </div>
+
     <div className="grid gap-5 lg:grid-cols-3">
       {/* Left: brief + details */}
       <div className="space-y-5 lg:col-span-2">
@@ -115,7 +122,7 @@ export default function ProjectOverview() {
           <div className="flex items-start justify-between gap-3">
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-400">Intent brief</h2>
+                <h2 className="text-base font-semibold tracking-tight">Intent brief</h2>
                 <StatusBadge status={project.status} />
                 {project.latestContract && (
                   <Badge tone="brand">
@@ -163,7 +170,7 @@ export default function ProjectOverview() {
         {/* Readiness summary */}
         <Card className="p-5">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-400">Readiness</h2>
+            <h2 className="text-base font-semibold tracking-tight">Readiness snapshot</h2>
             <Link to={`/app/projects/${project.id}/readiness`} className="text-xs font-medium text-brand-600 hover:underline">
               Full dashboard →
             </Link>
@@ -218,7 +225,7 @@ export default function ProjectOverview() {
 
         {/* Activity */}
         <Card className="p-5">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-400">Activity timeline</h2>
+          <h2 className="text-base font-semibold tracking-tight">Activity timeline</h2>
           {!activity?.length ? (
             <p className="mt-3 text-sm text-slate-500">No activity recorded yet.</p>
           ) : (
@@ -242,7 +249,7 @@ export default function ProjectOverview() {
         <CostAtRiskCard data={cost} />
 
         <Card className="p-5">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-400">Project team</h2>
+          <h2 className="flex items-center gap-2 text-base font-semibold tracking-tight"><UsersRound className="h-4 w-4 text-brand-500" /> Project team</h2>
           <ul className="mt-3 space-y-2.5">
             {project.members.map((m) => (
               <li key={m.id} className="flex items-center justify-between gap-2 text-sm">
@@ -254,7 +261,7 @@ export default function ProjectOverview() {
         </Card>
 
         <Card className="p-5">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-400">Ledger status</h2>
+          <h2 className="text-base font-semibold tracking-tight">Ledger status</h2>
           <div className="mt-3 flex flex-wrap gap-2">
             {Object.entries(project.inputCounts || {}).map(([status, count]) => (
               <Badge key={status} tone={status === 'approved' ? 'success' : status === 'disputed' ? 'danger' : 'neutral'}>
@@ -293,6 +300,37 @@ export default function ProjectOverview() {
         <Field label="Budget (INR)"><Input type="number" defaultValue={project.budget.amount} onChange={(e) => setEdit('budget', { amount: Number(e.target.value) || 0, currency: project.budget.currency })} /></Field>
       </Modal>
     </div>
+    </div>
+  );
+}
+
+function SummaryStat({
+  label,
+  value,
+  detail,
+  icon,
+  tone = 'brand',
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  icon: React.ReactNode;
+  tone?: 'brand' | 'success' | 'warning';
+}) {
+  const tones = {
+    brand: 'bg-brand-50 text-brand-600 dark:bg-brand-500/15 dark:text-brand-300',
+    success: 'bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300',
+    warning: 'bg-amber-50 text-amber-600 dark:bg-amber-500/15 dark:text-amber-300',
+  };
+  return (
+    <Card className="flex items-start gap-3 p-4">
+      <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${tones[tone]}`}>{icon}</span>
+      <div className="min-w-0">
+        <p className="text-[11px] font-medium uppercase tracking-wider text-slate-400">{label}</p>
+        <p className="mt-1 truncate text-base font-semibold tabular-nums">{value}</p>
+        <p className="mt-0.5 truncate text-xs text-slate-500">{detail}</p>
+      </div>
+    </Card>
   );
 }
 

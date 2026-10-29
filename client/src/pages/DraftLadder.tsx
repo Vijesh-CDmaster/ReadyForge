@@ -206,8 +206,13 @@ export default function DraftLadder() {
 
   return (
     <div className="space-y-6">
+      <SectionTitle
+        title="Draft ladder"
+        subtitle="Move from concept to final through reviewable, budget-aware production stages."
+        action={<Badge tone={contract.status === 'approved' ? 'success' : 'warning'}><Lock className="h-3 w-3" /> Contract {contract.status}</Badge>}
+      />
       {/* contract + budget header */}
-      <Card className="flex flex-wrap items-center justify-between gap-4">
+      <Card className="flex flex-wrap items-center justify-between gap-4 border-brand-200/70 bg-brand-50/20 p-5 dark:border-brand-500/20 dark:bg-brand-950/10">
         <div>
           <div className="flex items-center gap-2">
             <Badge tone={contract.status === 'approved' ? 'success' : 'warning'}>

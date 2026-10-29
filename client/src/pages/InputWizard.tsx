@@ -99,7 +99,8 @@ export default function InputWizard() {
       <Card className="p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="flex items-center gap-2 text-base font-semibold">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-brand-600 dark:text-brand-300">Knowledge intake</p>
+            <h2 className="mt-1 flex items-center gap-2 text-xl font-semibold tracking-tight">
               <Sparkles className="h-4 w-4 text-brand-500" /> AI Input Collection Wizard
             </h2>
             <p className="mt-1 text-sm text-slate-500">
@@ -123,9 +124,19 @@ export default function InputWizard() {
         )}
 
         {questionSet && (
-          <div className="mt-3 flex items-center gap-2">
-            <AiSourceBadge source={questionSet.aiSource} model={questionSet.model} />
-            <Badge tone="neutral">{questionSet.questions.length} questions</Badge>
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4 dark:border-slate-800">
+            <div className="flex items-center gap-2">
+              <AiSourceBadge source={questionSet.aiSource} model={questionSet.model} />
+              <Badge tone="neutral">{questionSet.questions.length} questions</Badge>
+            </div>
+            <div className="min-w-48 flex-1 sm:max-w-xs">
+              <div className="mb-1 flex justify-between text-[11px] text-slate-500">
+                <span>Current batch</span><span>{answeredCount}/{questionSet.questions.length} answered</span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                <div className="h-full rounded-full bg-brand-500 transition-all" style={{ width: `${questionSet.questions.length ? (answeredCount / questionSet.questions.length) * 100 : 0}%` }} />
+              </div>
+            </div>
           </div>
         )}
       </Card>
@@ -187,7 +198,7 @@ export default function InputWizard() {
             );
           })}
 
-          <div className="flex items-center justify-between">
+          <div className="sticky bottom-3 flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white/95 p-3 shadow-lg backdrop-blur dark:border-slate-700 dark:bg-slate-900/95">
             <p className="text-xs text-slate-500">{answeredCount} of {questionSet.questions.length} answered</p>
             <Button
               onClick={() => save.mutate()}

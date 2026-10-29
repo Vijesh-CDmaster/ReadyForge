@@ -143,7 +143,7 @@ export default function StoryboardEditor() {
       ) : (
         <div className="grid gap-3 md:grid-cols-2">
           {scenes.map((scene, idx) => (
-            <Card key={idx} className="space-y-3">
+            <Card key={idx} className="space-y-3 p-5 transition hover:border-brand-300 dark:hover:border-brand-700">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="flex h-6 w-6 items-center justify-center rounded-full bg-brand-100 text-xs font-semibold text-brand-700 dark:bg-brand-950 dark:text-brand-300">
