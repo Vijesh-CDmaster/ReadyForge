@@ -103,6 +103,34 @@ Then point `server/.env` at it (values above). Verify with `curl http://127.0.0.
 | `npm run seed` | (Re)run the demo seed — also backfills contract/generation data into older demo DBs |
 | `npx tsx seed-selftest.ts` (in `server/`) | Runs the seed against a throwaway in-memory MongoDB and asserts the demo data shape |
 
+## Asynchronous video jobs (mock only)
+
+Phase 2 provides a durable MongoDB-backed job flow for future video providers. The API enqueues
+jobs only after the project has an approved or locked Production Contract:
+
+- `POST /api/projects/:projectId/video-jobs` — enqueue a job; send an `Idempotency-Key` header
+- `GET /api/projects/:projectId/video-jobs` — list authorized project jobs
+- `GET /api/projects/:projectId/video-jobs/:jobId` — read authorized status and progress
+- `POST /api/projects/:projectId/video-jobs/:jobId/retry` — retry an eligible failed job
+- `POST /api/projects/:projectId/video-jobs/:jobId/cancel` — cancel a queued job
+
+The API process starts the polling worker automatically. Jobs are atomically claimed with a lease,
+heartbeat updates, stale-lease recovery, bounded retries, and lease ownership checks before
+progress or completion writes. The current provider is deterministic and offline: its output is
+explicitly labelled as a non-playable mock artifact and is never treated as approved production
+media. Real-provider billing, MP4 generation, and separate worker deployment are not implemented.
+
+Runway integration is currently an adapter and is fail-closed unless `VIDEO_PROVIDER=runway`,
+`RUNWAY_API_KEY`, `RUNWAY_ESTIMATED_COST_USD`, and `VIDEO_MAX_COST_USD` are explicitly set.
+Keep `VIDEO_PROVIDER=mock` for local development and tests. Provider credentials are server-only;
+they must never be placed in client configuration or committed to `.env.example`.
+
+Paid execution remains intentionally disabled until the budget counter and reservation ledger can
+be committed atomically (or reconciled by a durable ledger worker after a crash). Runway provider
+submission failures with unknown outcomes are recorded as manual-reconciliation cases rather than
+blindly retried. Cancellation is only supported for queued ReadyForge jobs; running provider jobs
+are reported as advisory/non-cancellable unless the provider contract is explicitly verified.
+
 ## Demo instructions
 
 1. Start everything (`npm run dev` + AI service) and open http://localhost:5173.
