@@ -48,6 +48,10 @@ export async function downloadAndStoreVideoOutput(params: {
     throw new VideoProviderError('Provider output download failed.', 'network', true);
   }
   if (!response.ok) throw new VideoProviderError('Provider output download failed.', 'provider', true);
+  const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+  if (contentType && contentType !== 'video/mp4' && contentType !== 'application/octet-stream') {
+    throw new VideoProviderError('Provider output MIME type is not an allowed MP4 type.', 'validation', false);
+  }
   const bytes = await readBounded(response);
   if (
     bytes.length < 12 ||
@@ -79,4 +83,17 @@ export async function downloadAndStoreVideoOutput(params: {
     await fs.rm(filePath, { force: true });
     throw error;
   }
+}
+
+export async function removeStoredVideoAsset(assetId: Types.ObjectId): Promise<void> {
+  const asset = await Asset.findOne({ _id: assetId, aiGenerated: true, type: 'video' });
+  if (!asset) return;
+  const fileName = path.basename(asset.fileUrl.replace(/^\/uploads\//, ''));
+  const filePath = path.resolve(config.upload.dir, fileName);
+  const uploadRoot = path.resolve(config.upload.dir);
+  if (filePath === uploadRoot || !filePath.startsWith(`${uploadRoot}${path.sep}`)) {
+    throw new Error('Stored video asset path is invalid.');
+  }
+  await fs.rm(filePath, { force: true });
+  await Asset.deleteOne({ _id: asset._id });
 }

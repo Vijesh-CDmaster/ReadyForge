@@ -23,13 +23,15 @@ export async function chargeProjectBudget(params: {
   cost: number;
   /** Short human description of what is being charged, used in the 402 message. */
   what: string;
+  operationKey?: string;
 }): Promise<void> {
-  const { projectId, cost, what } = params;
+  const { projectId, cost, what, operationKey } = params;
   if (cost <= 0) return;
 
   const charged = await Project.findOneAndUpdate(
     {
       _id: projectId,
+      ...(operationKey ? { 'budget.appliedOperations.key': { $ne: operationKey } } : {}),
       $or: [
         { 'budget.amount': 0 },
         { $expr: { $lte: [{ $add: ['$budget.spent', cost] }, '$budget.amount'] } },
@@ -51,6 +53,16 @@ export async function chargeProjectBudget(params: {
               { $max: [0, { $subtract: ['$budget.remaining', cost] }] },
             ],
           },
+          ...(operationKey
+            ? {
+                'budget.appliedOperations': {
+                  $concatArrays: [
+                    { $ifNull: ['$budget.appliedOperations', []] },
+                    [{ key: operationKey, kind: 'charge', amount: cost, createdAt: new Date() }],
+                  ],
+                },
+              }
+            : {}),
           updatedAt: new Date(),
         },
       },
@@ -59,6 +71,10 @@ export async function chargeProjectBudget(params: {
   );
 
   if (charged) return;
+  if (operationKey) {
+    const alreadyApplied = await Project.exists({ _id: projectId, 'budget.appliedOperations.key': operationKey });
+    if (alreadyApplied) return;
+  }
 
   const fresh = await Project.findById(projectId).select('budget').lean();
   if (!fresh) throw new ApiError(404, 'Project not found.');
@@ -77,12 +93,17 @@ export async function chargeProjectBudget(params: {
 export async function refundProjectBudget(params: {
   projectId: Types.ObjectId | string;
   cost: number;
+  operationKey?: string;
 }): Promise<void> {
-  const { projectId, cost } = params;
+  const { projectId, cost, operationKey } = params;
   if (cost <= 0) return;
 
   await Project.updateOne(
-    { _id: projectId, $expr: { $gte: ['$budget.spent', cost] } },
+    {
+      _id: projectId,
+      ...(operationKey ? { 'budget.appliedOperations.key': { $ne: operationKey } } : {}),
+      $expr: { $gte: ['$budget.spent', cost] },
+    },
     [
       {
         $set: {
@@ -99,6 +120,16 @@ export async function refundProjectBudget(params: {
               { $max: [0, { $add: ['$budget.remaining', cost] }] },
             ],
           },
+          ...(operationKey
+            ? {
+                'budget.appliedOperations': {
+                  $concatArrays: [
+                    { $ifNull: ['$budget.appliedOperations', []] },
+                    [{ key: operationKey, kind: 'refund', amount: cost, createdAt: new Date() }],
+                  ],
+                },
+              }
+            : {}),
           updatedAt: new Date(),
         },
       },

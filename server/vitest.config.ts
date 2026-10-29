@@ -9,5 +9,8 @@ export default defineConfig({
     testTimeout: 30_000,
     // The dev server holds its own MongoDB; tests use an isolated memory instance.
     isolate: true,
+    // Each suite owns a MongoMemoryServer; parallel startup causes avoidable
+    // process contention on constrained development machines.
+    fileParallelism: false,
   },
 });

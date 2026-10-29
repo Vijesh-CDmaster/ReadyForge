@@ -44,7 +44,13 @@ export interface IProject {
   callToAction?: string;
   successMetric?: string;
   deadline?: Date;
-  budget: { amount: number; currency: string; spent: number; remaining: number };
+  budget: {
+    amount: number;
+    currency: string;
+    spent: number;
+    remaining: number;
+    appliedOperations?: Array<{ key: string; kind: 'charge' | 'refund'; amount: number; createdAt: Date }>;
+  };
   currentStage: LadderStage;
   readinessScore: number;
   costAtRisk?: {
@@ -79,6 +85,14 @@ const projectSchema = new Schema<IProject>(
       currency: { type: String, default: 'INR' },
       spent: { type: Number, default: 0, min: 0 },
       remaining: { type: Number, default: 0 },
+      appliedOperations: [
+        {
+          key: { type: String, required: true },
+          kind: { type: String, enum: ['charge', 'refund'], required: true },
+          amount: { type: Number, required: true, min: 0 },
+          createdAt: { type: Date, required: true },
+        },
+      ],
     },
     currentStage: { type: String, enum: LADDER_STAGES, default: 'concept' },
     readinessScore: { type: Number, default: 0, min: 0, max: 100 },

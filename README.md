@@ -125,11 +125,15 @@ Runway integration is currently an adapter and is fail-closed unless `VIDEO_PROV
 Keep `VIDEO_PROVIDER=mock` for local development and tests. Provider credentials are server-only;
 they must never be placed in client configuration or committed to `.env.example`.
 
-Paid execution remains intentionally disabled until the budget counter and reservation ledger can
-be committed atomically (or reconciled by a durable ledger worker after a crash). Runway provider
-submission failures with unknown outcomes are recorded as manual-reconciliation cases rather than
-blindly retried. Cancellation is only supported for queued ReadyForge jobs; running provider jobs
-are reported as advisory/non-cancellable unless the provider contract is explicitly verified.
+Video reservations now use durable, per-project operation markers: the marker and budget counter
+change are committed in one MongoDB update, while a worker recovery pass repairs reservation
+state after a process crash. Repeated settlement and refund operations are idempotent. This
+removes the previous duplicate-counter window for video reservations, but paid execution remains
+intentionally disabled until the complete real-provider acceptance flow is audited end to end.
+Runway provider submission failures with unknown outcomes are recorded as
+manual-reconciliation cases rather than blindly retried. Cancellation is only supported for
+queued ReadyForge jobs; running provider jobs are reported as advisory/non-cancellable unless the
+provider contract is explicitly verified.
 
 ## Demo instructions
 

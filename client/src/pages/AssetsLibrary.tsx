@@ -5,6 +5,7 @@ import { api } from '../lib/api';
 import { Badge, Button, Card, ErrorBox, Loading, SectionTitle } from '../components/ui';
 import { toast } from '../store/toast';
 import { useProject } from './ProjectLayout';
+import { ProtectedVideoPreview } from '../components/ProtectedVideoPreview';
 
 interface AssetRow {
   id: string;
@@ -88,7 +89,7 @@ export default function AssetsLibrary() {
     const urls: string[] = [];
     void Promise.all(
       assets
-        .filter((asset) => asset.thumbnailUrl)
+        .filter((asset) => asset.thumbnailUrl && asset.type !== 'video')
         .map(async (asset) => {
           try {
             const blob = await api.getBlob(asset.fileUrl);
@@ -219,7 +220,9 @@ export default function AssetsLibrary() {
           {assets.map((a) => (
             <Card key={a.id} className="group overflow-hidden transition hover:-translate-y-0.5 hover:border-brand-300 dark:hover:border-brand-700">
               <div className="flex h-36 items-center justify-center bg-slate-100 dark:bg-slate-800">
-                {a.thumbnailUrl ? (
+                {a.type === 'video' && a.fileUrl ? (
+                  <ProtectedVideoPreview assetId={a.id} label={a.name} />
+                ) : a.thumbnailUrl ? (
                   <img
                     src={previewUrls[a.id]}
                     alt={a.name}

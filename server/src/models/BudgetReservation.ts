@@ -1,6 +1,6 @@
 import { Schema, model, Types } from 'mongoose';
 
-export const RESERVATION_STATUSES = ['pending', 'reserved', 'settled', 'refunded', 'manual_review'] as const;
+export const RESERVATION_STATUSES = ['pending', 'reserved', 'settling', 'settled', 'refunding', 'refunded', 'manual_review'] as const;
 export type ReservationStatus = (typeof RESERVATION_STATUSES)[number];
 
 export interface IBudgetReservation {
@@ -12,6 +12,7 @@ export interface IBudgetReservation {
   actualAmount: number;
   currency: string;
   status: ReservationStatus;
+  pendingActualAmount?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -25,6 +26,7 @@ const schema = new Schema<IBudgetReservation>(
     actualAmount: { type: Number, default: 0, min: 0 },
     currency: { type: String, required: true },
     status: { type: String, enum: RESERVATION_STATUSES, required: true, index: true },
+    pendingActualAmount: { type: Number, min: 0 },
   },
   { timestamps: true }
 );

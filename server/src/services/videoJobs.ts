@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
 import { Types } from 'mongoose';
 import { GenerationTask, IGenerationTask } from '../models/GenerationTask';
-import { Project } from '../models/Project';
-import { ProductionContract } from '../models/ProductionContract';
+import { IProject, Project } from '../models/Project';
+import { IProductionContract, ProductionContract } from '../models/ProductionContract';
 import { KnowledgeInput } from '../models/KnowledgeInput';
 import { Conflict } from '../models/Conflict';
 import { Asset } from '../models/Asset';
@@ -12,11 +12,15 @@ import { audit } from '../audit';
 import { generateMockVideo, MockProviderError } from './mockVideoProvider';
 import { getVideoProvider } from './videoProviderFactory';
 import { config } from '../config';
-import { reserveVideoBudget } from './videoBudget';
+import { recoverVideoBudgetReservations, reserveVideoBudget } from './videoBudget';
+import { refundVideoBudget, settleVideoBudget } from './videoBudget';
+import { downloadAndStoreVideoOutput, removeStoredVideoAsset } from './videoOutput';
+import { VideoProviderError } from './videoProvider';
 
 const LEASE_MS = 30_000;
 const POLL_MS = 100;
 const DEFAULT_MAX_ATTEMPTS = 3;
+const MAX_PROVIDER_POLLS = 120;
 
 export function fingerprintJob(input: { stage: string; mode: string; contractVersion: number }): string {
   return crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex');
@@ -180,7 +184,12 @@ export async function submitVideoJob(params: {
 
 async function recoverStaleJobs(now = new Date()): Promise<number> {
   const retryable = await GenerationTask.updateMany(
-    { status: 'running', leaseExpiresAt: { $lt: now }, retryCount: { $lt: DEFAULT_MAX_ATTEMPTS } },
+    {
+      status: 'running',
+      leaseExpiresAt: { $lt: now },
+      retryCount: { $lt: DEFAULT_MAX_ATTEMPTS },
+      ambiguousSubmission: { $ne: true },
+    },
     {
       $set: { status: 'queued', currentStage: 'recovered after worker lease expiry', nextAttemptAt: now },
       $unset: { leaseId: 1, leaseExpiresAt: 1, heartbeatAt: 1 },
@@ -241,6 +250,137 @@ async function heartbeat(taskId: Types.ObjectId, leaseId: string, progress: numb
   return updated.modifiedCount === 1;
 }
 
+async function processRealProviderJob(
+  task: IGenerationTask,
+  project: IProject,
+  contract: IProductionContract,
+  leaseId: string
+): Promise<void> {
+  const provider = getVideoProvider(task.providerId);
+  const inputs = await KnowledgeInput.find({ projectId: project._id });
+  const conflicts = await Conflict.find({ projectId: project._id });
+  const assets = await Asset.find({ projectId: project._id, workspaceId: task.workspaceId! });
+  const readiness = computeReadiness({ project, inputs, conflicts, assets, contract });
+  if (readiness.blockingIssues.length || contract.status === 'superseded') {
+    throw new VideoProviderError('Production readiness no longer permits video generation.', 'validation', false);
+  }
+  const availableAssetIds = new Set(assets.map((asset) => asset._id.toString()));
+  if (contract.approvedAssetIds.some((id) => !availableAssetIds.has(id.toString()))) {
+    throw new VideoProviderError('An approved input asset is no longer available.', 'validation', false);
+  }
+
+  let providerJobId = task.providerJobId;
+  if (!providerJobId) {
+    const submission = await provider.submit({
+      prompt: task.inputPrompt,
+      model: config.video.runwayModel,
+      durationSeconds: 5,
+      aspectRatio: '1280:720',
+      correlationId: task.correlationId || task._id.toString(),
+      idempotencyKey: task.idempotencyKey || task._id.toString(),
+    });
+    providerJobId = submission.providerJobId;
+    const persisted = await GenerationTask.updateOne(
+      { _id: task._id, status: 'running', leaseId, leaseExpiresAt: { $gt: new Date() } },
+      {
+        $set: {
+          providerJobId,
+          providerStatus: submission.status,
+          modelProvider: provider.id,
+          modelName: config.video.runwayModel,
+          costCurrency: submission.currency,
+          currentStage: 'provider job submitted',
+        },
+      }
+    );
+    if (persisted.modifiedCount !== 1) return;
+  }
+
+  let delay = config.video.pollInitialMs;
+  for (let poll = 0; poll < MAX_PROVIDER_POLLS; poll += 1) {
+    if (!(await heartbeat(task._id, leaseId, task.progress ?? 0, 'polling provider job'))) return;
+    const status = await provider.getStatus(providerJobId);
+    const saved = await GenerationTask.updateOne(
+      { _id: task._id, status: 'running', leaseId, leaseExpiresAt: { $gt: new Date() } },
+      { $set: { providerStatus: status.status, progress: status.progress ?? task.progress ?? 0, currentStage: `provider ${status.status}` } }
+    );
+    if (saved.modifiedCount !== 1) return;
+    if (status.status === 'running' || status.status === 'submitted') {
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      delay = Math.min(config.video.pollMaxMs, delay * 2);
+      continue;
+    }
+    if (status.status === 'cancelled') {
+      throw new VideoProviderError('The provider cancelled the video job.', 'provider', false);
+    }
+    if (status.status === 'failed') {
+      throw status.error || new VideoProviderError('The provider failed the video job.', 'provider', false);
+    }
+    if (!status.outputUrl) {
+      throw new VideoProviderError('The provider completed without an output URL.', 'validation', false);
+    }
+
+    const latestContract = await ProductionContract.findOne({
+      _id: task.contractId,
+      projectId: task.projectId,
+      version: task.contractVersion,
+      status: { $in: ['approved', 'locked'] },
+    });
+    if (!latestContract) {
+      throw new VideoProviderError('The captured Production Contract was superseded before completion.', 'validation', false);
+    }
+    const outputAssetId = await downloadAndStoreVideoOutput({
+      taskId: task._id,
+      projectId: task.projectId,
+      workspaceId: task.workspaceId!,
+      uploadedById: task.createdById,
+      outputUrl: status.outputUrl,
+    });
+    try {
+      if (task.budgetReservationId) {
+        await settleVideoBudget({
+          reservationId: task.budgetReservationId,
+          actualAmount: status.actualCost ?? task.estimatedCost ?? 0,
+        });
+      }
+      const completed = await GenerationTask.updateOne(
+        { _id: task._id, status: 'running', leaseId, leaseExpiresAt: { $gt: new Date() } },
+        {
+          $set: {
+            status: 'requires_approval',
+            providerStatus: 'succeeded',
+            outputAssetId,
+            actualCost: status.actualCost ?? task.estimatedCost ?? 0,
+            costCurrency: status.currency || task.costCurrency,
+            progress: 100,
+            currentStage: 'video output ready for review',
+            completedAt: new Date(),
+          },
+          $unset: { leaseId: 1, leaseExpiresAt: 1, heartbeatAt: 1 },
+        }
+      );
+      if (completed.modifiedCount !== 1) {
+        await removeStoredVideoAsset(outputAssetId);
+        return;
+      }
+    } catch (error) {
+      await removeStoredVideoAsset(outputAssetId).catch(() => undefined);
+      throw error;
+    }
+    audit({
+      workspaceId: task.workspaceId!.toString(),
+      projectId: task.projectId.toString(),
+      actorType: 'system',
+      action: 'video_job.completed',
+      entityType: 'generation_task',
+      entityId: task._id.toString(),
+      after: { provider: provider.id, providerJobId, outputAssetId: outputAssetId.toString(), reviewStatus: 'pending' },
+    });
+    return;
+  }
+  throw new VideoProviderError('Provider polling timed out.', 'timeout', true);
+}
+
 async function processJob(task: IGenerationTask): Promise<void> {
   const leaseId = task.leaseId;
   if (!leaseId || !task.workspaceId || !task.contractVersion) {
@@ -251,7 +391,7 @@ async function processJob(task: IGenerationTask): Promise<void> {
     return;
   }
   try {
-    const project = await Project.findById(task.projectId).select('title workspaceId');
+    const project = await Project.findById(task.projectId);
     if (!project) throw new MockProviderError('Project no longer exists.', 'MOCK_PERMANENT', false);
     const contract = await ProductionContract.findOne({
       _id: task.contractId,
@@ -261,18 +401,7 @@ async function processJob(task: IGenerationTask): Promise<void> {
     });
     if (!contract) throw new MockProviderError('The captured Production Contract is no longer approved.', 'MOCK_PERMANENT', false);
     if (task.providerId && task.providerId !== 'mock') {
-      await GenerationTask.updateOne(
-        { _id: task._id, status: 'running', leaseId },
-        {
-          $set: {
-            status: 'failed',
-            errorCode: 'REAL_PROVIDER_WORKER_NOT_ENABLED',
-            errorMessage: 'The real provider adapter is available for contract testing but paid worker execution is disabled until output storage and reconciliation are enabled.',
-            currentStage: 'manual implementation gate',
-          },
-          $unset: { leaseId: 1, leaseExpiresAt: 1, heartbeatAt: 1 },
-        }
-      );
+      await processRealProviderJob(task, project, contract, leaseId);
       return;
     }
     const result = await generateMockVideo(
@@ -281,6 +410,7 @@ async function processJob(task: IGenerationTask): Promise<void> {
         if (!(await heartbeat(task._id, leaseId, progress, stage))) {
           throw new MockProviderError('Worker lease was lost.', 'MOCK_RETRYABLE', true);
         }
+
       }
     );
     const now = new Date();
@@ -305,7 +435,7 @@ async function processJob(task: IGenerationTask): Promise<void> {
     );
     if (completed.modifiedCount !== 1) return;
     audit({
-      workspaceId: task.workspaceId.toString(),
+      workspaceId: task.workspaceId!.toString(),
       projectId: task.projectId.toString(),
       actorType: 'system',
       action: 'video_job.completed',
@@ -316,9 +446,20 @@ async function processJob(task: IGenerationTask): Promise<void> {
   } catch (error) {
     const providerError = error instanceof MockProviderError
       ? error
-      : new MockProviderError('Mock job failed.', 'MOCK_RETRYABLE', true);
-    const retryable = providerError.retryable && (task.retryCount ?? 0) + 1 < (task.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
+      : error instanceof VideoProviderError
+        ? error
+        : new MockProviderError('Mock job failed.', 'MOCK_RETRYABLE', true);
+    const errorCode = providerError instanceof MockProviderError
+      ? providerError.code
+      : `VIDEO_${providerError.kind.toUpperCase()}`;
+    const ambiguousSubmission = providerError instanceof VideoProviderError && providerError.ambiguousSubmission;
+    const retryable = providerError.retryable
+      && !ambiguousSubmission
+      && (task.retryCount ?? 0) + 1 < (task.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
     const now = new Date();
+    if (!retryable && task.budgetReservationId && !ambiguousSubmission) {
+      await refundVideoBudget(task.budgetReservationId).catch(() => undefined);
+    }
     await GenerationTask.updateOne(
       { _id: task._id, status: 'running', leaseId },
       retryable
@@ -327,7 +468,7 @@ async function processJob(task: IGenerationTask): Promise<void> {
               status: 'queued',
               currentStage: 'retry scheduled',
               nextAttemptAt: new Date(now.getTime() + Math.min(5_000, 250 * 2 ** (task.retryCount ?? 0))),
-              errorCode: providerError.code,
+              errorCode,
               errorMessage: providerError.message,
             },
             $inc: { retryCount: 1 },
@@ -336,9 +477,10 @@ async function processJob(task: IGenerationTask): Promise<void> {
         : {
             $set: {
               status: 'failed',
-              currentStage: 'mock job failed',
-              errorCode: providerError.code,
+              errorCode,
               errorMessage: providerError.message,
+              ambiguousSubmission,
+              currentStage: ambiguousSubmission ? 'manual billing/provider reconciliation required' : 'provider job failed',
               completedAt: now,
             },
             $unset: { leaseId: 1, leaseExpiresAt: 1, heartbeatAt: 1 },
@@ -368,6 +510,7 @@ export class VideoJobWorker {
     if (this.stopping) return;
     this.activeTick = (async () => {
       await recoverStaleJobs();
+      await recoverVideoBudgetReservations();
       const task = await claimJob(this.workerId);
       if (task) await processJob(task);
       if (!this.stopping) this.timer = setTimeout(() => void this.tick(), POLL_MS);

@@ -31,6 +31,7 @@ import {
   cx,
 } from '../components/ui';
 import { AiSourceBadge } from '../components/widgets';
+import { ProtectedVideoPreview } from '../components/ProtectedVideoPreview';
 
 export interface LadderTask {
   id: string;
@@ -128,7 +129,19 @@ export default function DraftLadder() {
   const { data: videoJobs } = useQuery({
     queryKey: ['video-jobs', projectId],
     queryFn: () =>
-      api.get<{ jobs: Array<{ id: string; status: string; progress: number; currentStage: string; errorMessage: string | null; mockOutput: boolean }> }>(
+      api.get<{
+        jobs: Array<{
+          id: string;
+          status: string;
+          progress: number;
+          currentStage: string;
+          errorMessage: string | null;
+          mockOutput: boolean;
+          outputAssetId: string | null;
+          retryCount: number;
+          maxAttempts: number;
+        }>;
+      }>(
         `/api/projects/${projectId}/video-jobs`
       ),
     enabled: Boolean(projectId),
@@ -148,7 +161,18 @@ export default function DraftLadder() {
         { stage: 'final', mode: 'success' },
         { 'Idempotency-Key': `mock-video-${projectId}-${Date.now()}` }
       ),
-    onSuccess: () => toast.success('Mock video job queued — output will be clearly labelled'),
+    onSuccess: () => {
+      toast.success('Mock video job queued — output will be clearly labelled');
+      void queryClient.invalidateQueries({ queryKey: ['video-jobs', projectId] });
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+  const retryVideo = useMutation({
+    mutationFn: (id: string) => api.post<{ job: { id: string } }>(`/api/video-jobs/${id}/retry`),
+    onSuccess: () => {
+      toast.success('Video job retry queued');
+      void queryClient.invalidateQueries({ queryKey: ['video-jobs', projectId] });
+    },
     onError: (err: Error) => toast.error(err.message),
   });
 
@@ -278,10 +302,32 @@ export default function DraftLadder() {
               <p className="text-sm font-semibold">Asynchronous mock video</p>
               <p className="mt-1 text-xs text-slate-500">Test-only output; not a playable MP4 or approved production result.</p>
               {videoJobs?.jobs[0] && (
-                <p className="mt-1 text-xs text-brand-700">
-                  {videoJobs.jobs[0].status} · {videoJobs.jobs[0].progress}% · {videoJobs.jobs[0].currentStage}
-                  {videoJobs.jobs[0].errorMessage ? ` — ${videoJobs.jobs[0].errorMessage}` : ''}
-                </p>
+                <div className="mt-2 space-y-2 text-xs text-brand-700">
+                  <p>
+                    {videoJobs.jobs[0].status} · {videoJobs.jobs[0].progress}% · {videoJobs.jobs[0].currentStage}
+                    {videoJobs.jobs[0].errorMessage ? ` — ${videoJobs.jobs[0].errorMessage}` : ''}
+                  </p>
+                  {videoJobs.jobs[0].status === 'failed' &&
+                    videoJobs.jobs[0].retryCount < videoJobs.jobs[0].maxAttempts && (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        loading={retryVideo.isPending}
+                        onClick={() => retryVideo.mutate(videoJobs.jobs[0].id)}
+                      >
+                        Retry video job
+                      </Button>
+                    )}
+                  {videoJobs.jobs[0].status === 'succeeded' && videoJobs.jobs[0].outputAssetId && !videoJobs.jobs[0].mockOutput && (
+                    <ProtectedVideoPreview
+                      assetId={videoJobs.jobs[0].outputAssetId}
+                      label="Generated video preview"
+                    />
+                  )}
+                  {videoJobs.jobs[0].status === 'succeeded' && videoJobs.jobs[0].mockOutput && (
+                    <p className="text-amber-700">Mock output is a placeholder and cannot be played as a video.</p>
+                  )}
+                </div>
               )}
             </div>
             <Button size="sm" onClick={() => mockVideo.mutate()} loading={mockVideo.isPending}>

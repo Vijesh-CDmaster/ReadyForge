@@ -27,6 +27,15 @@ describe('protected video output storage', () => {
       .rejects.toMatchObject({ kind: 'validation' });
   });
 
+  it('rejects a provider MIME type that is not an allowed video type', async () => {
+    const bytes = Buffer.concat([Buffer.from([0, 0, 0, 0]), Buffer.from('ftypisom'), Buffer.alloc(32)]);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(bytes, { status: 200, headers: { 'content-type': 'text/html' } })
+    ));
+    await expect(downloadAndStoreVideoOutput({ ...ids(), outputUrl: 'https://provider.invalid/output' }))
+      .rejects.toMatchObject({ kind: 'validation' });
+  });
+
   it('stores valid MP4 output as an owned generated asset', async () => {
     const bytes = Buffer.concat([Buffer.from([0, 0, 0, 0]), Buffer.from('ftypisom'), Buffer.alloc(32)]);
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
