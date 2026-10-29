@@ -105,7 +105,7 @@ export default function GettingStarted() {
       label: 'Collect role-based inputs',
       detail: 'The AI wizard asks only what is missing; each answer becomes a Knowledge Input.',
       done: totalInputs > 0,
-      to: `${base}/inputs`,
+      to: `${base}/knowledge/inputs`,
     },
     {
       key: 'conflicts',

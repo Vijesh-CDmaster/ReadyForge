@@ -1,4 +1,4 @@
-import { Navigate, NavLink, Outlet, useParams } from 'react-router-dom';
+import { Link, Navigate, NavLink, Outlet, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { Badge, ErrorBox, Loading } from '../components/ui';
@@ -64,12 +64,8 @@ export default function ProjectLayout() {
   // Grouped so 15 destinations stay scannable (UI_AUDIT plan #5).
   const tabGroups: Array<{ label: string; tabs: Array<{ to: string; label: string; end?: boolean }> }> = [
     {
-      label: 'Knowledge',
-      tabs: [
-        { to: base, label: 'Overview', end: true },
-        { to: `${base}/inputs`, label: 'AI wizard' },
-        { to: `${base}/ledger`, label: `Ledger (${totalInputs})` },
-      ],
+      label: 'Project',
+      tabs: [{ to: base, label: 'Overview', end: true }],
     },
     {
       label: 'Governance',
@@ -121,8 +117,16 @@ export default function ProjectLayout() {
             {data.budget.remaining.toLocaleString('en-IN')} remaining
           </p>
         </div>
-        <div className="w-56">
-          <ReadinessMeter score={data.readinessScore} compact />
+        <div className="flex items-center gap-3">
+          <Link
+            to={`${base}/knowledge`}
+            className="rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm font-medium text-brand-700 transition hover:border-brand-300 hover:bg-brand-100 dark:border-brand-500/30 dark:bg-brand-500/10 dark:text-brand-300 dark:hover:bg-brand-500/20"
+          >
+            Knowledge <span className="ml-1 text-xs opacity-75">({totalInputs})</span>
+          </Link>
+          <div className="w-56">
+            <ReadinessMeter score={data.readinessScore} compact />
+          </div>
         </div>
       </div>
 

@@ -450,7 +450,7 @@ projectsRouter.get(
     const report = computeReadiness({ project, inputs, conflicts, assets, contract });
     res.json({
       ...report,
-      valid: report.blockingIssues.length === 0,
+      valid: report.productionAuthorization.authorized,
       openConflicts: conflicts.filter((c) => c.status === 'open' || c.status === 'awaiting_decision').length,
       contractStatus: contract?.status ?? null,
       validatedAt: new Date(),

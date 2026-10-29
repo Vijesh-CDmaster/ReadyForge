@@ -6,6 +6,7 @@ import type { IProject } from '../models/Project';
 import type { IKnowledgeInput } from '../models/KnowledgeInput';
 import type { IConflict } from '../models/Conflict';
 import type { IAsset } from '../models/Asset';
+import type { IProductionContract } from '../models/ProductionContract';
 
 const project = (over: Record<string, unknown> = {}) =>
   ({
@@ -30,6 +31,15 @@ const input = (over: Record<string, unknown> = {}) =>
   ({ type: 'fact', status: 'approved', title: 'Input', content: 'Some content', tags: [], ...over }) as unknown as IKnowledgeInput;
 const asset = (over: Record<string, unknown> = {}) =>
   ({ _id: 'a1', licenseStatus: 'owned', ...over }) as unknown as IAsset;
+const contract = (over: Record<string, unknown> = {}) =>
+  ({
+    _id: 'contract-1',
+    version: 1,
+    status: 'approved',
+    contentPlan: { script: 'A complete script.', storyboard: [{ sceneNumber: 1, title: 'Opening', description: 'Opening shot', status: 'approved' }] },
+    requiredApprovals: [],
+    ...over,
+  }) as unknown as IProductionContract;
 
 describe('readiness engine', () => {
   it('scores a complete, conflict-free project higher than an empty one', () => {
@@ -85,6 +95,193 @@ describe('readiness engine', () => {
     });
     expect(warned.blockingIssues.some((i) => i.code === 'unlicensed_asset')).toBe(false);
     expect(warned.warnings.some((i) => i.code === 'unknown_license')).toBe(true);
+  });
+
+  it('identifies missing stage evidence instead of presenting a storyboard stage as ready', () => {
+    const report = computeReadiness({
+      project: project({ currentStage: 'storyboard' }),
+      inputs: [input()],
+      conflicts: [],
+      assets: [],
+      contract: contract({ contentPlan: { script: '', storyboard: [] } }),
+    });
+
+    expect(report.evidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'script', status: 'missing' }),
+        expect.objectContaining({ key: 'storyboard', status: 'missing' }),
+      ])
+    );
+    expect(report.missingRequirements).toEqual(
+      expect.arrayContaining([
+        'Required production evidence missing: Production script for storyboard stage',
+        'Required production evidence missing: Storyboard for storyboard stage',
+      ])
+    );
+    expect(report.productionAuthorization.authorized).toBe(false);
+    expect(report.productionAuthorization.blockers.map((b) => b.code)).toEqual(
+      expect.arrayContaining(['missing_script', 'missing_storyboard'])
+    );
+  });
+
+  it('keeps early concept stages from being blocked by inapplicable script and storyboard evidence', () => {
+    const report = computeReadiness({
+      project: project({ currentStage: 'concept' }),
+      inputs: [input()],
+      conflicts: [],
+      assets: [],
+      contract: contract({ contentPlan: { script: '', storyboard: [] } }),
+    });
+
+    expect(report.evidence.find((item) => item.key === 'script')?.status).toBe('not_applicable');
+    expect(report.evidence.find((item) => item.key === 'storyboard')?.status).toBe('not_applicable');
+    expect(report.productionAuthorization.blockers.some((b) => b.code === 'missing_script')).toBe(false);
+  });
+
+  it('authorizes a stage only when its evidence and contract approval are present', () => {
+    const report = computeReadiness({
+      project: project({ projectType: 'custom', currentStage: 'final' }),
+      inputs: [input()],
+      conflicts: [],
+      assets: [asset()],
+      contract: contract(),
+    });
+
+    expect(report.evidence.every((item) => item.status === 'verified')).toBe(true);
+    expect(report.productionAuthorization.authorized).toBe(true);
+    expect(report.score).toBeGreaterThan(0);
+  });
+
+  it('does not let a high score bypass a pending contract approval', () => {
+    const report = computeReadiness({
+      project: project({ currentStage: 'final' }),
+      inputs: [input()],
+      conflicts: [],
+      assets: [asset()],
+      contract: contract({
+        requiredApprovals: [{ userId: 'user-1', role: 'reviewer', status: 'pending' }],
+      }),
+    });
+
+    expect(report.score).toBeGreaterThanOrEqual(50);
+    expect(report.blockingIssues).toHaveLength(0);
+    expect(report.productionAuthorization.authorized).toBe(false);
+    expect(report.productionAuthorization.blockers.some((b) => b.code === 'pending_contract_approvals')).toBe(true);
+  });
+
+  it('assesses food evidence without treating unsupported safety claims as verified', () => {
+    const report = computeReadiness({
+      project: project({
+        projectType: 'video',
+        description: '60-second chicken biryani recipe video',
+        currentStage: 'final',
+      }),
+      inputs: [
+        input({ title: 'Recipe source', content: 'Family recipe reference', sourceReference: 'cookbook-1' }),
+        input({ type: 'claim', title: 'Food safety claim', content: 'Safe to eat after two hours', status: 'draft' }),
+      ],
+      conflicts: [],
+      assets: [asset()],
+      contract: contract(),
+    });
+
+    expect(report.categoryAssessment.category).toBe('food');
+    expect(report.categoryAssessment.criteria).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'food_ingredients_quantities', status: 'missing' }),
+        expect.objectContaining({ key: 'food_safety_claims', status: 'failed' }),
+      ])
+    );
+    expect(report.productionAuthorization.authorized).toBe(false);
+  });
+
+  it('does not mark a tutorial complete when ordered instructional steps are missing', () => {
+    const report = computeReadiness({
+      project: project({ projectType: 'video', description: 'Software tutorial walkthrough', currentStage: 'storyboard' }),
+      inputs: [input({ type: 'goal', title: 'Learning objective', content: 'Learn the workflow', status: 'approved' })],
+      conflicts: [],
+      assets: [],
+      contract: contract({ contentPlan: { script: 'Explain the workflow clearly.', storyboard: [] } }),
+    });
+
+    expect(report.categoryAssessment.category).toBe('tutorial');
+    expect(report.categoryAssessment.criteria).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'tutorial_ordered_steps', status: 'unknown', method: 'human_required' }),
+      ])
+    );
+    expect(report.productionAuthorization.authorized).toBe(false);
+  });
+
+  it('flags unsupported advertisement claims and missing applicable disclaimers', () => {
+    const report = computeReadiness({
+      project: project({ projectType: 'ad', description: 'Advertisement with a limited discount and disclaimer' }),
+      inputs: [
+        input({ type: 'claim', title: 'Discount claim', content: 'Best price guaranteed', status: 'draft' }),
+      ],
+      conflicts: [],
+      assets: [],
+    });
+
+    expect(report.categoryAssessment.category).toBe('advertisement');
+    expect(report.categoryAssessment.criteria).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'advertisement_claims', status: 'failed' }),
+        expect.objectContaining({ key: 'advertisement_disclaimers', status: 'missing' }),
+      ])
+    );
+  });
+
+  it('flags documentary facts without source attribution', () => {
+    const report = computeReadiness({
+      project: project({ projectType: 'video', description: 'Documentary about a local history' }),
+      inputs: [input({ type: 'fact', title: 'Historical fact', content: 'The site opened in 1920', status: 'approved' })],
+      conflicts: [],
+      assets: [],
+    });
+
+    expect(report.categoryAssessment.category).toBe('documentary');
+    expect(report.categoryAssessment.criteria).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'documentary_source_attribution', status: 'missing' }),
+      ])
+    );
+  });
+
+  it('flags social platform evidence while leaving absent target duration explicitly unknown', () => {
+    const report = computeReadiness({
+      project: project({ projectType: 'social_post', description: 'Creator video for social media' }),
+      inputs: [],
+      conflicts: [],
+      assets: [],
+    });
+
+    expect(report.categoryAssessment.category).toBe('social_creator');
+    expect(report.categoryAssessment.criteria).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'social_platform', status: 'missing' }),
+        expect.objectContaining({ key: 'social_duration', status: 'unknown' }),
+      ])
+    );
+  });
+
+  it('changes category evidence when relevant ledger evidence is removed', () => {
+    const base = project({ projectType: 'video', description: 'Chicken recipe video' });
+    const withIngredients = computeReadiness({
+      project: base,
+      inputs: [input({ title: 'Ingredient quantity', content: '500 gram rice and 2 cup water', status: 'approved' })],
+      conflicts: [],
+      assets: [],
+    });
+    const withoutIngredients = computeReadiness({
+      project: base,
+      inputs: [],
+      conflicts: [],
+      assets: [],
+    });
+
+    expect(withIngredients.categoryAssessment.criteria.find((c) => c.key === 'food_ingredients_quantities')?.status).toBe('verified');
+    expect(withoutIngredients.categoryAssessment.criteria.find((c) => c.key === 'food_ingredients_quantities')?.status).toBe('missing');
   });
 });
 

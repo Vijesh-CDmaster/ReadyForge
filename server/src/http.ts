@@ -1,6 +1,15 @@
-import { Response } from 'express';
+import { randomUUID } from 'node:crypto';
+import { Request, Response } from 'express';
 import { z, ZodTypeAny } from 'zod';
 import { config } from './config';
+
+declare global {
+  namespace Express {
+    interface Request {
+      requestId?: string;
+    }
+  }
+}
 
 export class ApiError extends Error {
   status: number;
@@ -26,39 +35,64 @@ export function validateBody<S extends ZodTypeAny>(schema: S, data: unknown): z.
   return result.data as z.output<S>;
 }
 
-export function errorHandler(err: unknown, _req: any, res: Response, _next: any) {
+export function requestId(req: Request, _res: Response, next: () => void) {
+  const supplied = req.header('x-request-id');
+  req.requestId = supplied && /^[A-Za-z0-9._-]{1,80}$/.test(supplied) ? supplied : `rf-${randomUUID()}`;
+  next();
+}
+
+function response(res: Response, status: number, error: string, requestId: string, details?: unknown) {
+  res.setHeader('X-Request-Id', requestId);
+  return res.status(status).json({ error, requestId, ...(details === undefined ? {} : { details }) });
+}
+
+export function errorHandler(err: unknown, req: Request, res: Response, _next: any) {
+  const id = req.requestId || `rf-${randomUUID()}`;
   if (err instanceof ApiError) {
-    return res.status(err.status).json({ error: err.message, details: err.details });
+    return response(res, err.status, err.message, id, err.details);
   }
-  const e = err as { code?: number | string; name?: string; message?: string; status?: number; statusCode?: number };
+  const e = err as {
+    code?: number | string;
+    name?: string;
+    message?: string;
+    status?: number;
+    statusCode?: number;
+  };
   if (e?.code === 11000) {
-    return res.status(409).json({ error: 'Duplicate value — record already exists.' });
+    return response(res, 409, 'Duplicate value — record already exists.', id);
   }
   if (e?.name === 'CastError') {
-    return res.status(400).json({ error: 'Invalid id format.' });
+    return response(res, 400, 'Invalid id format.', id);
   }
   // Optimistic-concurrency conflict (Workspace uses `optimisticConcurrency`):
   // another writer won the race — safe to tell the client to retry.
   if (e?.name === 'VersionError') {
-    return res.status(409).json({ error: 'Record was modified concurrently — please retry.' });
+    return response(res, 409, 'Record was modified concurrently — please retry.', id);
   }
   // Multer upload errors: oversize → 413, anything else → 400. Never a 500.
   if (e?.name === 'MulterError') {
     const tooLarge = e.code === 'LIMIT_FILE_SIZE';
-    return res.status(tooLarge ? 413 : 400).json({
-      error: tooLarge
+    return response(
+      res,
+      tooLarge ? 413 : 400,
+      tooLarge
         ? `File exceeds the ${config.upload.maxMb}MB upload limit.`
         : `Upload failed: ${String(e.code || 'unknown error')}`,
-    });
+      id
+    );
   }
   // Body-parser / JSON syntax errors carry status 400 — honour any 4xx the
   // underlying library already decided instead of turning it into a 500.
   const libStatus = e?.status ?? e?.statusCode;
   if (typeof libStatus === 'number' && libStatus >= 400 && libStatus < 500) {
-    return res.status(libStatus).json({ error: e.message || 'Invalid request' });
+    return response(res, libStatus, e.message || 'Invalid request', id);
   }
-  console.error('[error]', err);
+  if (e?.name === 'MongoServerSelectionError' || e?.name === 'MongoNetworkError' || e?.name === 'MongooseServerSelectionError') {
+    console.error(`[error ${id}] database unavailable`, err);
+    return response(res, 503, 'Database temporarily unavailable. Please try again.', id);
+  }
+  console.error(`[error ${id}]`, err);
   // Never echo internal error messages: they can contain connection strings,
   // credentials or stack fragments. Details stay in the server log.
-  return res.status(500).json({ error: 'Internal server error' });
+  return response(res, 500, 'Internal server error', id);
 }

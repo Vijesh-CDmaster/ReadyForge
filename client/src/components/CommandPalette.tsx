@@ -60,8 +60,9 @@ export function CommandPalette(props: {
       const title = props.projectTitle || 'Current project';
       const tabs: Array<[string, string]> = [
         ['', 'Overview'],
-        ['inputs', 'AI wizard'],
-        ['ledger', 'Knowledge ledger'],
+        ['knowledge', 'Knowledge'],
+        ['knowledge/inputs', 'AI wizard'],
+        ['knowledge/ledger', 'Knowledge ledger'],
         ['conflicts', 'Conflict room'],
         ['assets', 'Asset library'],
         ['rights', 'Rights & licences'],

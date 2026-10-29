@@ -3,6 +3,17 @@ type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 let accessToken: string | null = null;
 let onUnauthorized: (() => void) | null = null;
 
+export class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly requestId?: string
+  ) {
+    super(message);
+    this.name = 'ApiRequestError';
+  }
+}
+
 export function setAccessToken(token: string | null) {
   accessToken = token;
   if (token) localStorage.setItem('rf_token', token);
@@ -20,15 +31,18 @@ export function setUnauthorizedHandler(fn: () => void) {
   onUnauthorized = fn;
 }
 
-async function tryRefresh(): Promise<boolean> {
+type RefreshResult = 'refreshed' | 'unauthorized' | 'unavailable';
+
+async function tryRefresh(): Promise<RefreshResult> {
   try {
     const res = await fetch('/api/auth/refresh', { method: 'POST', credentials: 'include' });
-    if (!res.ok) return false;
+    if (res.status === 503) return 'unavailable';
+    if (!res.ok) return 'unauthorized';
     const data = (await res.json()) as { accessToken: string };
     setAccessToken(data.accessToken);
-    return true;
+    return 'refreshed';
   } catch {
-    return false;
+    return 'unavailable';
   }
 }
 
@@ -60,12 +74,18 @@ async function request<T>(path: string, opts: { method?: Method; body?: unknown;
     if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
       throw new Error('Request timed out — the server took too long to respond. Please try again.', { cause: err });
     }
-    throw err;
+    throw new ApiRequestError(
+      'The API is unavailable. Check that the server is running and try again.',
+      undefined
+    );
   }
 
   if (res.status === 401 && opts.retry !== false) {
     const refreshed = await tryRefresh();
-    if (refreshed) return request<T>(path, { ...opts, retry: false });
+    if (refreshed === 'refreshed') return request<T>(path, { ...opts, retry: false });
+    if (refreshed === 'unavailable') {
+      throw new ApiRequestError('The API or database is temporarily unavailable. Please try again.', 503);
+    }
     setAccessToken(null);
     onUnauthorized?.();
     throw new Error('Session expired — please sign in again.');
@@ -73,13 +93,16 @@ async function request<T>(path: string, opts: { method?: Method; body?: unknown;
 
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
+    let requestId: string | undefined;
     try {
-      const data = (await res.json()) as { error?: string };
+      const data = (await res.json()) as { error?: string; requestId?: string };
       if (data?.error) message = data.error;
+      requestId = data?.requestId;
     } catch {
       /* non-JSON error body */
     }
-    throw new Error(message);
+    if (res.status === 503) message = 'The database or API is temporarily unavailable. Please try again.';
+    throw new ApiRequestError(message, res.status, requestId);
   }
 
   if (res.status === 204) return undefined as T;
@@ -94,20 +117,26 @@ async function requestBlob(path: string, retry = true): Promise<Blob> {
 
   if (res.status === 401 && retry) {
     const refreshed = await tryRefresh();
-    if (refreshed) return requestBlob(path, false);
+    if (refreshed === 'refreshed') return requestBlob(path, false);
+    if (refreshed === 'unavailable') {
+      throw new ApiRequestError('The API or database is temporarily unavailable. Please try again.', 503);
+    }
     setAccessToken(null);
     onUnauthorized?.();
     throw new Error('Session expired — please sign in again.');
   }
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
+    let requestId: string | undefined;
     try {
-      const data = (await res.json()) as { error?: string };
+      const data = (await res.json()) as { error?: string; requestId?: string };
       if (data?.error) message = data.error;
+      requestId = data?.requestId;
     } catch {
       /* non-JSON error body */
     }
-    throw new Error(message);
+    if (res.status === 503) message = 'The database or API is temporarily unavailable. Please try again.';
+    throw new ApiRequestError(message, res.status, requestId);
   }
   return res.blob();
 }

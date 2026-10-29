@@ -8,6 +8,9 @@ export async function connectDb(): Promise<void> {
   let uri = config.mongoUri;
 
   if (!uri) {
+    if (config.isProd) {
+      throw new Error('MONGODB_URI must be set in production. Refusing to use the local database fallback.');
+    }
     // Local/dev: start a persistent in-memory MongoDB stored under server/.data
     const { MongoMemoryServer } = await import('mongodb-memory-server');
     const dbPath = `${config.dataDir}/mongo`;
@@ -25,8 +28,12 @@ export async function connectDb(): Promise<void> {
     }
   }
 
-  await mongoose.connect(uri);
+  await mongoose.connect(uri, { serverSelectionTimeoutMS: 10_000 });
   console.log('[db] connected');
+}
+
+export function isDbReady(): boolean {
+  return mongoose.connection.readyState === 1;
 }
 
 export async function disconnectDb(): Promise<void> {

@@ -100,7 +100,7 @@ export default function CreateProject() {
       await refreshMe();
       await queryClient.invalidateQueries({ queryKey: ['projects'] });
       toast.success('Project created — start with the AI input wizard');
-      navigate(`/app/projects/${project.id}/inputs`);
+      navigate(`/app/projects/${project.id}/knowledge/inputs`);
     },
     onError: (err) => setServerError(err.message),
   });

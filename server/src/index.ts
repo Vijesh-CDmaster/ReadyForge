@@ -4,7 +4,8 @@ import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import { config } from './config';
 import { connectDb } from './db';
-import { errorHandler } from './http';
+import { errorHandler, requestId } from './http';
+import { isDbReady } from './db';
 import { authRouter } from './routes/auth';
 import { workspacesRouter } from './routes/workspaces';
 import { invitationsRouter } from './routes/invitations';
@@ -36,10 +37,20 @@ export function createApp() {
   );
   app.use(express.json({ limit: '2mb' }));
   app.use(cookieParser());
+  app.use(requestId);
 
   app.get('/api/health', (_req, res) =>
     res.json({ ok: true, service: 'readyforge-api', ai: Boolean(config.ai.apiKey), time: new Date().toISOString() })
   );
+  app.get('/api/ready', (_req, res) => {
+    const ready = isDbReady();
+    res.status(ready ? 200 : 503).json({
+      ok: ready,
+      service: 'readyforge-api',
+      database: ready ? 'ready' : 'unavailable',
+      time: new Date().toISOString(),
+    });
+  });
 
   /*
    * Unknown endpoints must answer 404, not fall into router-level auth (which
@@ -112,10 +123,17 @@ async function main() {
   const app = createApp();
   const worker = new VideoJobWorker();
   worker.start();
-  const server = app.listen(config.port, () => {
-    console.log(`[api] ReadyForge API on http://localhost:${config.port}`);
-    console.log(`[ai]  provider: ${config.ai.apiKey ? `${config.ai.baseUrl} (${config.ai.model})` : 'rule engine (set OPENAI_API_KEY to enable LLM calls)'}`);
+  const server = await new Promise<import('node:http').Server>((resolve, reject) => {
+    const instance = app.listen(config.port, () => resolve(instance));
+    instance.once('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(`[startup] Port ${config.port} is already in use. Stop the existing API or set PORT to another value.`);
+      }
+      reject(err);
+    });
   });
+  console.log(`[api] ReadyForge API on http://localhost:${config.port}`);
+  console.log(`[ai]  provider: ${config.ai.apiKey ? `${config.ai.baseUrl} (${config.ai.model})` : 'rule engine (set OPENAI_API_KEY to enable LLM calls)'}`);
   const shutdown = () => {
     void worker.stop().finally(() => server.close());
   };

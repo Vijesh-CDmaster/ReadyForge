@@ -8,8 +8,12 @@ import { Workspace } from '../models/Workspace';
 import { Project } from '../models/Project';
 import { ProductionContract } from '../models/ProductionContract';
 import { GenerationTask } from '../models/GenerationTask';
+import { Asset } from '../models/Asset';
+import { Conflict } from '../models/Conflict';
 import { signAccessToken } from '../middleware/auth';
-import { submitVideoJob, VideoJobWorker } from '../services/videoJobs';
+import { processRealProviderJob, revalidateVideoJobAuthorization, submitVideoJob, VideoJobWorker } from '../services/videoJobs';
+import { evaluateProductionAuthorization } from '../services/productionAuthorization';
+import { VideoProvider, VideoProviderError } from '../services/videoProvider';
 import { connectTestDb, disconnectTestDb, clearDb } from './helpers/db';
 
 let server: http.Server;
@@ -30,7 +34,16 @@ async function setup() {
     workspaceId: workspace._id,
     createdById: user._id,
     title: 'Mock Video Project',
+    description: 'Authorized mock video project',
     projectType: 'video',
+    status: 'draft',
+    mode: 'solo',
+    objective: 'Demonstrate the project',
+    audience: 'Test viewers',
+    tone: 'Clear',
+    callToAction: 'Watch now',
+    deadline: new Date(Date.now() + 86400_000),
+    currentStage: 'final',
     budget: { amount: 100, currency: 'INR', spent: 0, remaining: 100 },
   });
   const contract = await ProductionContract.create({
@@ -40,6 +53,15 @@ async function setup() {
     status: 'locked',
     version: 3,
     objective: 'Test',
+    audience: 'Test viewers',
+    tone: 'Clear',
+    keyMessage: 'A valid production contract',
+    callToAction: 'Watch now',
+    contentPlan: {
+      outline: ['Opening'],
+      script: 'A complete production script.',
+      storyboard: [{ sceneNumber: 1, title: 'Opening', description: 'Opening shot', durationSeconds: 5, status: 'approved' }],
+    },
   });
   return { user, workspace, project, contract };
 }
@@ -52,6 +74,26 @@ async function waitForStatus(id: Types.ObjectId, status: string, timeout = 2000)
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Timed out waiting for ${status}`);
+}
+
+function fakeProvider(onSubmit: () => void): VideoProvider {
+  return {
+    id: 'fake',
+    async estimateCost() {
+      return { amount: 0, currency: 'INR' };
+    },
+    async submit() {
+      onSubmit();
+      return { providerJobId: 'fake-job', status: 'submitted', estimatedCost: 0, currency: 'INR' };
+    },
+    async getStatus() {
+      return {
+        providerJobId: 'fake-job',
+        status: 'failed',
+        error: new VideoProviderError('Fake provider failure', 'provider', false),
+      };
+    },
+  };
 }
 
 beforeAll(async () => {
@@ -70,6 +112,223 @@ afterAll(async () => {
 beforeEach(async () => clearDb());
 
 describe('durable mock video jobs', () => {
+  it('rejects final video-job submission when category evidence is missing', async () => {
+    const { user, workspace, project } = await setup();
+    project.description = 'Food recipe video';
+    await project.save();
+
+    await expect(
+      submitVideoJob({
+        projectId: project._id,
+        workspaceId: workspace._id,
+        userId: user._id,
+        stage: 'final',
+        mode: 'success',
+        idempotencyKey: 'missing-food-evidence',
+      })
+    ).rejects.toMatchObject({ status: 409, message: expect.stringContaining('food_ingredients_quantities') });
+  });
+
+  it('rejects pending required contract approvals', async () => {
+    const { user, workspace, project, contract } = await setup();
+    contract.requiredApprovals = [{ userId: user._id, role: 'reviewer', status: 'pending' }];
+    await contract.save();
+
+    await expect(
+      submitVideoJob({
+        projectId: project._id,
+        workspaceId: workspace._id,
+        userId: user._id,
+        stage: 'final',
+        mode: 'success',
+        idempotencyKey: 'pending-approval',
+      })
+    ).rejects.toMatchObject({ status: 409, message: expect.stringContaining('pending_contract_approvals') });
+  });
+
+  it('rejects restricted assets and high-severity conflicts for final jobs', async () => {
+    const { user, workspace, project } = await setup();
+    await Asset.create({
+      workspaceId: workspace._id,
+      projectId: project._id,
+      uploadedById: user._id,
+      name: 'Restricted image',
+      type: 'image',
+      fileUrl: '/uploads/restricted.png',
+      mimeType: 'image/png',
+      licenseStatus: 'restricted',
+    });
+    await expect(
+      submitVideoJob({
+        projectId: project._id,
+        workspaceId: workspace._id,
+        userId: user._id,
+        stage: 'final',
+        mode: 'success',
+        idempotencyKey: 'restricted-asset',
+      })
+    ).rejects.toMatchObject({ status: 409, message: expect.stringContaining('unlicensed_asset') });
+
+    await Asset.deleteMany({ projectId: project._id });
+    await Conflict.create({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      title: 'Unresolved final conflict',
+      description: 'The final claim is disputed.',
+      severity: 'critical',
+      status: 'open',
+      conflictType: 'factual',
+      detectedBy: 'system',
+    });
+    await expect(
+      submitVideoJob({
+        projectId: project._id,
+        workspaceId: workspace._id,
+        userId: user._id,
+        stage: 'final',
+        mode: 'success',
+        idempotencyKey: 'critical-conflict',
+      })
+    ).rejects.toMatchObject({ status: 409, message: expect.stringContaining('critical_conflict') });
+  });
+
+  it('does not block concept authorization with final-stage category evidence', async () => {
+    const { user, workspace, project, contract } = await setup();
+    project.currentStage = 'concept';
+    project.description = 'Food recipe concept';
+    await project.save();
+    await Asset.create({
+      workspaceId: workspace._id,
+      projectId: project._id,
+      uploadedById: user._id,
+      name: 'Concept reference',
+      type: 'image',
+      fileUrl: '/uploads/concept.png',
+      mimeType: 'image/png',
+      licenseStatus: 'restricted',
+    });
+    const authorization = evaluateProductionAuthorization({
+      project,
+      inputs: [],
+      conflicts: [],
+      assets: await Asset.find({ projectId: project._id }),
+      contract,
+      stage: 'concept',
+    });
+    expect(authorization.authorized).toBe(true);
+  });
+
+  it('rejects invalid real-provider worker evidence before provider submission', async () => {
+    const { user, workspace, project, contract } = await setup();
+    const expired = await Asset.create({
+      workspaceId: workspace._id,
+      projectId: project._id,
+      uploadedById: user._id,
+      name: 'Expired worker asset',
+      type: 'image',
+      fileUrl: '/uploads/expired-boundary.png',
+      mimeType: 'image/png',
+      licenseStatus: 'expired',
+    });
+    const task = await GenerationTask.create({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      contractId: contract._id,
+      contractVersion: contract.version,
+      createdById: user._id,
+      taskType: 'final',
+      stage: 'final',
+      status: 'running',
+      leaseId: 'boundary-worker',
+      leaseExpiresAt: new Date(Date.now() + 30_000),
+      idempotencyKey: 'boundary-invalid',
+    });
+    let submitCalls = 0;
+    const provider = fakeProvider(() => {
+      submitCalls += 1;
+    });
+
+    await expect(processRealProviderJob(task, project, contract, 'boundary-worker', provider)).rejects.toMatchObject({
+      kind: 'validation',
+    });
+    expect(submitCalls).toBe(0);
+    await expired.deleteOne();
+  });
+
+  it('allows valid real-provider worker evidence to reach the provider', async () => {
+    const { user, workspace, project, contract } = await setup();
+    const task = await GenerationTask.create({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      contractId: contract._id,
+      contractVersion: contract.version,
+      createdById: user._id,
+      taskType: 'final',
+      stage: 'final',
+      status: 'running',
+      leaseId: 'boundary-valid',
+      leaseExpiresAt: new Date(Date.now() + 30_000),
+      idempotencyKey: 'boundary-valid',
+    });
+    let submitCalls = 0;
+    const provider = fakeProvider(() => {
+      submitCalls += 1;
+    });
+
+    await expect(processRealProviderJob(task, project, contract, 'boundary-valid', provider)).rejects.toMatchObject({
+      kind: 'provider',
+    });
+    expect(submitCalls).toBe(1);
+  });
+
+  it('revalidates queued mock jobs before execution when evidence changes', async () => {
+    const { user, workspace, project } = await setup();
+    const { task } = await submitVideoJob({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      userId: user._id,
+      stage: 'final',
+      mode: 'success',
+      idempotencyKey: 'revalidate-before-worker',
+    });
+    await Asset.create({
+      workspaceId: workspace._id,
+      projectId: project._id,
+      uploadedById: user._id,
+      name: 'Expired image',
+      type: 'image',
+      fileUrl: '/uploads/expired.png',
+      mimeType: 'image/png',
+      licenseStatus: 'expired',
+    });
+    const worker = new VideoJobWorker();
+    worker.start();
+    const failed = await waitForStatus(task._id, 'failed');
+    await worker.stop();
+    expect(failed.errorMessage).toContain('unlicensed_asset');
+  });
+
+  it('revalidates persisted evidence for the real-provider worker boundary', async () => {
+    const { user, workspace, project, contract } = await setup();
+    await Asset.create({
+      workspaceId: workspace._id,
+      projectId: project._id,
+      uploadedById: user._id,
+      name: 'Expired image',
+      type: 'image',
+      fileUrl: '/uploads/expired-worker.png',
+      mimeType: 'image/png',
+      licenseStatus: 'expired',
+    });
+    const authorization = await revalidateVideoJobAuthorization(
+      { projectId: project._id, workspaceId: workspace._id },
+      project,
+      contract
+    );
+    expect(authorization.authorized).toBe(false);
+    expect(authorization.blockers.some((blocker) => blocker.code === 'unlicensed_asset')).toBe(true);
+  });
+
   it('creates an idempotent queued job and rejects conflicting key reuse', async () => {
     const { user, workspace, project } = await setup();
     const first = await submitVideoJob({

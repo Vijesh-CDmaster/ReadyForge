@@ -15,6 +15,8 @@ const WorkspaceDetail = lazy(() => import('./pages/WorkspaceDetail'));
 const CreateProject = lazy(() => import('./pages/CreateProject'));
 const ProjectLayout = lazy(() => import('./pages/ProjectLayout'));
 const ProjectOverview = lazy(() => import('./pages/ProjectOverview'));
+const KnowledgeLayout = lazy(() => import('./pages/KnowledgeLayout'));
+const KnowledgeOverview = lazy(() => import('./pages/KnowledgeOverview'));
 const InputWizard = lazy(() => import('./pages/InputWizard'));
 const KnowledgeLedger = lazy(() => import('./pages/KnowledgeLedger'));
 const ConflictRoom = lazy(() => import('./pages/ConflictRoom'));
@@ -94,8 +96,13 @@ export default function App() {
 
         <Route path="projects/:projectId" element={<ProjectLayout />}>
           <Route index element={<ProjectOverview />} />
-          <Route path="inputs" element={<InputWizard />} />
-          <Route path="ledger" element={<KnowledgeLedger />} />
+          <Route path="knowledge" element={<KnowledgeLayout />}>
+            <Route index element={<KnowledgeOverview />} />
+            <Route path="inputs" element={<InputWizard />} />
+            <Route path="ledger" element={<KnowledgeLedger />} />
+          </Route>
+          <Route path="inputs" element={<Navigate to="knowledge/inputs" replace />} />
+          <Route path="ledger" element={<Navigate to="knowledge/ledger" replace />} />
           <Route path="conflicts" element={<ConflictRoom />} />
           <Route path="assets" element={<AssetsLibrary />} />
           <Route path="rights" element={<RightsManager />} />

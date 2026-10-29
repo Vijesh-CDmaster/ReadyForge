@@ -15,6 +15,8 @@ interface ReadinessReport {
   warnings: Array<{ code: string; message: string; severity: string }>;
   recommendations: string[];
   missingRequirements: string[];
+  productionAuthorization: { authorized: boolean; blockers: Array<{ code: string; message: string; severity: string }> };
+  generatedAt: string;
 }
 
 interface CostReport {
@@ -43,7 +45,7 @@ export default function ProjectOverview() {
   const [editValues, setEditValues] = useState<Record<string, unknown>>({});
   const setEdit = (key: string, value: unknown) => setEditValues((v) => ({ ...v, [key]: value }));
 
-  const { data: readiness } = useQuery({
+  const { data: readiness, isLoading: readinessLoading, error: readinessError } = useQuery({
     queryKey: ['readiness', project?.id],
     queryFn: () => api.get<ReadinessReport>(`/api/projects/${project!.id}/readiness`),
     enabled: Boolean(project?.id),
@@ -106,11 +108,14 @@ export default function ProjectOverview() {
   };
 
   const blockers = readiness?.blockingIssues || [];
+  const authorizationBlockers = readiness?.productionAuthorization.blockers || [];
+  const liveScore = readiness?.score;
+  const displayedScore = liveScore ?? project.readinessScore;
 
   return (
     <div className="space-y-5">
       <div className="grid gap-3 sm:grid-cols-3">
-        <SummaryStat label="Readiness" value={`${Math.round(readiness?.score ?? project.readinessScore)}/100`} detail={blockers.length ? `${blockers.length} blocker${blockers.length === 1 ? '' : 's'} open` : 'No blockers detected'} icon={<CheckCircle2 className="h-4 w-4" />} tone={blockers.length ? 'warning' : 'success'} />
+        <SummaryStat label={liveScore === undefined ? 'Stored readiness score' : 'Readiness'} value={`${Math.round(displayedScore)}/100`} detail={liveScore === undefined ? 'Last-validated value; current status unavailable' : `${authorizationBlockers.length ? `${authorizationBlockers.length} authorization blocker${authorizationBlockers.length === 1 ? '' : 's'}` : 'Production authorization open'}`} icon={<CheckCircle2 className="h-4 w-4" />} tone={liveScore === undefined ? 'warning' : authorizationBlockers.length ? 'warning' : 'success'} />
         <SummaryStat label="Budget remaining" value={`${project.budget.currency} ${project.budget.remaining.toLocaleString('en-IN')}`} detail={`of ${project.budget.amount.toLocaleString('en-IN')} planned`} icon={<WalletCards className="h-4 w-4" />} />
         <SummaryStat label="Project inputs" value={`${Object.values(project.inputCounts || {}).reduce((a, b) => a + b, 0)}`} detail={`${project.members.length} team member${project.members.length === 1 ? '' : 's'}`} icon={<Database className="h-4 w-4" />} />
       </div>
@@ -177,12 +182,24 @@ export default function ProjectOverview() {
           </div>
 
           <div className="mt-3">
-            <ReadinessMeter score={readiness?.score ?? project.readinessScore} />
+            <ReadinessMeter score={displayedScore} />
           </div>
 
-          {blockers.length > 0 && (
+          {readinessLoading && (
+            <p className="mt-3 text-xs text-slate-500">Loading current readiness and production authorization…</p>
+          )}
+
+          {readinessError && !readiness && (
+            <p className="mt-3 text-xs text-amber-700 dark:text-amber-300">Current readiness is unavailable. The score shown is the stored last-validated value; it may be stale.</p>
+          )}
+
+          {!readiness && !readinessLoading && !readinessError && (
+            <p className="mt-3 text-xs text-amber-700 dark:text-amber-300">No current readiness assessment is available. The stored score may be stale.</p>
+          )}
+
+          {readiness && !readiness.productionAuthorization.authorized && (
             <div className="mt-4 space-y-2">
-              {blockers.map((b, i) => (
+              {authorizationBlockers.map((b, i) => (
                 <div
                   key={i}
                   className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-200"
@@ -192,6 +209,18 @@ export default function ProjectOverview() {
                 </div>
               ))}
             </div>
+          )}
+
+          {readiness && readiness.productionAuthorization.authorized && (
+            <p className="mt-3 flex items-center gap-2 text-xs text-emerald-700 dark:text-emerald-300">
+              <CheckCircle2 className="h-3.5 w-3.5" /> Production authorization is open for the current readiness assessment.
+            </p>
+          )}
+
+          {readiness && blockers.length > 0 && (
+            <p className="mt-3 text-xs text-slate-500">
+              {blockers.length} common readiness diagnostic{blockers.length === 1 ? '' : 's'} reported; see the dashboard for details.
+            </p>
           )}
 
           {readiness && readiness.warnings.length > 0 && (
@@ -204,14 +233,16 @@ export default function ProjectOverview() {
             </ul>
           )}
 
-          {(!readiness || blockers.length === 0) && (
-            <p className="mt-3 flex items-center gap-2 text-xs text-emerald-700 dark:text-emerald-300">
-              <CheckCircle2 className="h-3.5 w-3.5" /> No blocking issues detected — keep collecting inputs to raise the score.
-            </p>
+          {readiness && blockers.length === 0 && (
+            <p className="mt-3 text-xs text-slate-500">No common rubric diagnostics detected.</p>
           )}
 
+          <p className="mt-3 text-[11px] text-slate-400">
+            {readiness ? `Current assessment computed ${new Date(readiness.generatedAt).toLocaleString()}.` : 'Stored score is not guaranteed to reflect current project evidence.'}
+          </p>
+
           <div className="mt-4 flex flex-wrap gap-2">
-            <Link to={`/app/projects/${project.id}/inputs`}>
+            <Link to={`/app/projects/${project.id}/knowledge/inputs`}>
               <Button size="sm" variant="outline">Answer AI questions</Button>
             </Link>
             <Link to={`/app/projects/${project.id}/conflicts`}>

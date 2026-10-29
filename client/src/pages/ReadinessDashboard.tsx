@@ -14,6 +14,21 @@ interface ReadinessReport {
   recommendations: string[];
   missingRequirements: string[];
   approvalGate: { required: number; approved: number; satisfied: boolean };
+  evidence: Array<{ key: string; label: string; status: 'verified' | 'failed' | 'missing' | 'unknown' | 'not_applicable'; reason: string }>;
+  categoryAssessment: {
+    category: string | null;
+    criteria: Array<{
+      key: string;
+      label: string;
+      status: 'verified' | 'failed' | 'missing' | 'unknown' | 'not_applicable';
+      method?: 'deterministic' | 'ai_assisted' | 'human_required';
+      reason: string;
+      evidenceRef?: string;
+      mandatoryBlocker?: boolean;
+    }>;
+    limitation?: string;
+  };
+  productionAuthorization: { authorized: boolean; blockers: Array<{ code: string; message: string; severity: string }> };
   generatedAt: string;
 }
 
@@ -43,9 +58,16 @@ export default function ReadinessDashboard() {
   const data = report || current.data;
   if (current.isLoading && !data) return <Loading label="Calculating readiness…" />;
   if (current.error && !data) return <ErrorBox error={current.error} />;
-  if (!data) return null;
+  if (!data) {
+    return (
+      <Card className="p-5">
+        <p className="text-sm text-slate-600 dark:text-slate-300">No readiness assessment is available for this project yet.</p>
+      </Card>
+    );
+  }
 
   const blockers = data.blockingIssues;
+  const authorizationBlockers = data.productionAuthorization.blockers;
 
   return (
     <div className="space-y-5">
@@ -61,17 +83,17 @@ export default function ReadinessDashboard() {
 
       <Card className={cx(
         'overflow-hidden border-l-4 p-5',
-        blockers.length ? 'border-l-rose-500 bg-rose-50/40 dark:bg-rose-950/10' : 'border-l-emerald-500 bg-emerald-50/40 dark:bg-emerald-950/10'
+        data.productionAuthorization.authorized ? 'border-l-emerald-500 bg-emerald-50/40 dark:bg-emerald-950/10' : 'border-l-rose-500 bg-rose-50/40 dark:bg-rose-950/10'
       )}>
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-start gap-3">
-            <span className={cx('mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full', blockers.length ? 'bg-rose-100 text-rose-600 dark:bg-rose-500/15 dark:text-rose-300' : 'bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300')}>
-              {blockers.length ? <ShieldAlert className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}
+            <span className={cx('mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full', data.productionAuthorization.authorized ? 'bg-emerald-100 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300' : 'bg-rose-100 text-rose-600 dark:bg-rose-500/15 dark:text-rose-300')}>
+              {data.productionAuthorization.authorized ? <CheckCircle2 className="h-4 w-4" /> : <ShieldAlert className="h-4 w-4" />}
             </span>
             <div>
-              <p className="text-sm font-semibold">{blockers.length ? 'Production gate is closed' : 'Production gate is open'}</p>
+              <p className="text-sm font-semibold">{data.productionAuthorization.authorized ? 'Production gate is open' : 'Production gate is closed'}</p>
               <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
-                {blockers.length ? `${blockers.length} blocking issue${blockers.length === 1 ? '' : 's'} must be resolved before generation.` : 'No blocking issues detected. Keep the contract and approvals current.'}
+                {data.productionAuthorization.authorized ? 'Production authorization requirements are satisfied for this assessment.' : `${authorizationBlockers.length} authorization blocker${authorizationBlockers.length === 1 ? '' : 's'} must be resolved before generation.`}
               </p>
             </div>
           </div>
@@ -80,6 +102,25 @@ export default function ReadinessDashboard() {
             <ArrowRight className="h-3.5 w-3.5" />
           </div>
         </div>
+      </Card>
+
+      <Card className={cx(
+        'border-l-4 p-5',
+        data.productionAuthorization.authorized
+          ? 'border-l-emerald-500 bg-emerald-50/40 dark:bg-emerald-950/10'
+          : 'border-l-rose-500 bg-rose-50/40 dark:bg-rose-950/10'
+      )}>
+        <p className="text-sm font-semibold">
+          {data.productionAuthorization.authorized ? 'Production authorization: open' : 'Production authorization: closed'}
+        </p>
+        <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
+          Readiness is an evidence score; authorization also requires mandatory contracts, approvals, budget, rights, and stage prerequisites.
+        </p>
+        {!data.productionAuthorization.authorized && (
+          <ul className="mt-3 space-y-1 text-sm text-rose-700 dark:text-rose-300">
+            {authorizationBlockers.map((blocker, index) => <li key={`${blocker.code}-${index}`}>{blocker.message}</li>)}
+          </ul>
+        )}
       </Card>
 
       <div className="grid gap-5 lg:grid-cols-3">
@@ -98,10 +139,11 @@ export default function ReadinessDashboard() {
           <div className="mt-4 w-full">
             <Progress value={data.score} />
           </div>
+
           <div className="mt-4 flex w-full justify-around text-xs">
             <div>
               <p className="font-bold text-rose-500">{blockers.length}</p>
-              <p className="text-slate-500">blockers</p>
+              <p className="text-slate-500">diagnostics</p>
             </div>
             <div>
               <p className="font-bold text-amber-500">{data.warnings.length}</p>
@@ -148,15 +190,66 @@ export default function ReadinessDashboard() {
         </Card>
       </div>
 
+      <Card className="p-5">
+        <h3 className="text-base font-semibold tracking-tight">Stage evidence</h3>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          {data.evidence.map((item) => (
+            <div key={item.key} className="rounded-lg border border-slate-200 px-3 py-2 dark:border-slate-800">
+              <div className="flex items-center justify-between gap-2 text-sm">
+                <span className="font-medium">{item.label}</span>
+                <Badge tone={item.status === 'verified' ? 'success' : item.status === 'not_applicable' ? 'neutral' : 'warning'}>
+                  {item.status}
+                </Badge>
+              </div>
+              <p className="mt-1 text-xs text-slate-500">{item.reason}</p>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {data.categoryAssessment.category && (
+        <Card className="p-5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-base font-semibold tracking-tight">
+                {data.categoryAssessment.category.replace('_', ' ')} criteria
+              </h3>
+              <p className="mt-0.5 text-xs text-slate-500">Reported separately from the common weighted score.</p>
+            </div>
+            <Badge tone="neutral">Evidence rubric</Badge>
+          </div>
+          <div className="mt-4 grid gap-2 md:grid-cols-2">
+            {data.categoryAssessment.criteria.map((item) => (
+              <div key={item.key} className="rounded-lg border border-slate-200 px-3 py-2 dark:border-slate-800">
+                <div className="flex items-center justify-between gap-2 text-sm">
+                  <span className="font-medium">{item.label}</span>
+                  <Badge tone={item.status === 'verified' ? 'success' : item.status === 'not_applicable' ? 'neutral' : 'warning'}>
+                    {item.status}
+                  </Badge>
+                </div>
+                <p className="mt-1 text-xs text-slate-500">{item.reason}</p>
+                <p className="mt-1 text-[11px] text-slate-400">
+                  {item.method?.replace('_', ' ')}{item.mandatoryBlocker ? ' · mandatory gate' : ''}
+                  {item.evidenceRef ? ` · ${item.evidenceRef}` : ''}
+                </p>
+              </div>
+            ))}
+          </div>
+          {data.categoryAssessment.limitation && (
+            <p className="mt-3 text-xs text-slate-500">{data.categoryAssessment.limitation}</p>
+          )}
+        </Card>
+      )}
+
       {/* Issues + recommendations */}
       <div className="grid gap-5 lg:grid-cols-2">
         <Card className="p-5">
-          <h3 className="flex items-center gap-2 text-base font-semibold text-rose-600">
-            <ShieldAlert className="h-4 w-4" /> Blocking issues ({blockers.length})
+          <h3 className="flex items-center gap-2 text-base font-semibold text-slate-700 dark:text-slate-200">
+            <ShieldAlert className="h-4 w-4" /> Common readiness diagnostics ({blockers.length})
           </h3>
           {blockers.length === 0 ? (
-            <p className="mt-3 flex items-center gap-2 text-sm text-emerald-600">
-              <CheckCircle2 className="h-4 w-4" /> Nothing blocking — generation gates are open.
+            <p className="mt-3 flex items-center gap-2 text-sm text-slate-500">
+              <CheckCircle2 className="h-4 w-4" /> No common rubric diagnostics detected.
             </p>
           ) : (
             <ul className="mt-3 space-y-2">

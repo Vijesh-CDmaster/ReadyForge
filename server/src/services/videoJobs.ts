@@ -6,7 +6,8 @@ import { IProductionContract, ProductionContract } from '../models/ProductionCon
 import { KnowledgeInput } from '../models/KnowledgeInput';
 import { Conflict } from '../models/Conflict';
 import { Asset } from '../models/Asset';
-import { computeReadiness } from '../engines/readiness';
+import { authorizationMessage, evaluateProductionAuthorization } from './productionAuthorization';
+import type { ProductionAuthorization } from './productionAuthorization';
 import { ApiError } from '../http';
 import { audit } from '../audit';
 import { generateMockVideo, MockProviderError } from './mockVideoProvider';
@@ -15,7 +16,7 @@ import { config } from '../config';
 import { recoverVideoBudgetReservations, reserveVideoBudget } from './videoBudget';
 import { refundVideoBudget, settleVideoBudget } from './videoBudget';
 import { downloadAndStoreVideoOutput, removeStoredVideoAsset } from './videoOutput';
-import { VideoProviderError } from './videoProvider';
+import { VideoProvider, VideoProviderError } from './videoProvider';
 
 const LEASE_MS = 30_000;
 const POLL_MS = 100;
@@ -59,6 +60,26 @@ export function serializeVideoJob(task: IGenerationTask) {
   };
 }
 
+export async function revalidateVideoJobAuthorization(
+  task: Pick<IGenerationTask, 'projectId' | 'workspaceId'>,
+  project: IProject,
+  contract: IProductionContract
+): Promise<ProductionAuthorization> {
+  const [inputs, conflicts, assets] = await Promise.all([
+    KnowledgeInput.find({ projectId: project._id }),
+    Conflict.find({ projectId: project._id }),
+    Asset.find({ projectId: project._id, workspaceId: task.workspaceId }),
+  ]);
+  return evaluateProductionAuthorization({
+    project,
+    inputs,
+    conflicts,
+    assets,
+    contract,
+    stage: 'final',
+  });
+}
+
 export async function submitVideoJob(params: {
   projectId: Types.ObjectId;
   workspaceId: Types.ObjectId;
@@ -78,28 +99,7 @@ export async function submitVideoJob(params: {
   }).sort('-version');
   if (!contract) throw new ApiError(409, 'An approved or locked Production Contract is required.');
 
-  const requestFingerprint = fingerprintJob({
-    stage: params.stage,
-    mode: params.mode || 'success',
-    contractVersion: contract.version,
-  });
   const provider = getVideoProvider();
-  if (provider.id !== 'mock') {
-    const [inputs, conflicts, assets] = await Promise.all([
-      KnowledgeInput.find({ projectId: project._id }),
-      Conflict.find({ projectId: project._id }),
-      Asset.find({ projectId: project._id, workspaceId: params.workspaceId }),
-    ]);
-    const readiness = computeReadiness({ project, inputs, conflicts, assets, contract });
-    if (readiness.blockingIssues.length) {
-      throw new ApiError(409, 'Readiness blockers prevent paid video generation.');
-    }
-    const availableAssetIds = new Set(assets.map((asset) => asset._id.toString()));
-    if (contract.approvedAssetIds.some((id) => !availableAssetIds.has(id.toString()))) {
-      throw new ApiError(409, 'Approved Production Contract assets are no longer available.');
-    }
-    throw new ApiError(503, 'The selected real video provider is not enabled until output storage and billing reconciliation are configured.');
-  }
   const providerEstimate = await provider.estimateCost({
     prompt: `Generate video for "${project.title}"`,
     model: config.video.runwayModel,
@@ -110,6 +110,37 @@ export async function submitVideoJob(params: {
   });
   if (providerEstimate.amount > 0 && (!config.video.maxCost || providerEstimate.amount > config.video.maxCost)) {
     throw new ApiError(402, 'The estimated video cost exceeds the configured per-job ceiling.');
+  }
+
+  const [inputs, conflicts, assets] = await Promise.all([
+    KnowledgeInput.find({ projectId: project._id }),
+    Conflict.find({ projectId: project._id }),
+    Asset.find({ projectId: project._id, workspaceId: params.workspaceId }),
+  ]);
+  const authorization = evaluateProductionAuthorization({
+    project,
+    inputs,
+    conflicts,
+    assets,
+    contract,
+    stage: 'final',
+    estimatedCost: providerEstimate.amount,
+  });
+  if (!authorization.authorized) {
+    throw new ApiError(409, authorizationMessage(authorization));
+  }
+
+  const requestFingerprint = fingerprintJob({
+    stage: params.stage,
+    mode: params.mode || 'success',
+    contractVersion: contract.version,
+  });
+  if (provider.id !== 'mock') {
+    const availableAssetIds = new Set(assets.map((asset) => asset._id.toString()));
+    if (contract.approvedAssetIds.some((id) => !availableAssetIds.has(id.toString()))) {
+      throw new ApiError(409, 'Approved Production Contract assets are no longer available.');
+    }
+    throw new ApiError(503, 'The selected real video provider is not enabled until output storage and billing reconciliation are configured.');
   }
   const correlationId = crypto.randomUUID();
   const existing = await GenerationTask.findOne({
@@ -250,20 +281,24 @@ async function heartbeat(taskId: Types.ObjectId, leaseId: string, progress: numb
   return updated.modifiedCount === 1;
 }
 
-async function processRealProviderJob(
+export async function processRealProviderJob(
   task: IGenerationTask,
   project: IProject,
   contract: IProductionContract,
-  leaseId: string
+  leaseId: string,
+  providerOverride?: VideoProvider
 ): Promise<void> {
-  const provider = getVideoProvider(task.providerId);
-  const inputs = await KnowledgeInput.find({ projectId: project._id });
-  const conflicts = await Conflict.find({ projectId: project._id });
-  const assets = await Asset.find({ projectId: project._id, workspaceId: task.workspaceId! });
-  const readiness = computeReadiness({ project, inputs, conflicts, assets, contract });
-  if (readiness.blockingIssues.length || contract.status === 'superseded') {
-    throw new VideoProviderError('Production readiness no longer permits video generation.', 'validation', false);
+  const provider = providerOverride ?? getVideoProvider(task.providerId);
+  const authorization = await revalidateVideoJobAuthorization(task, project, contract);
+  if (!authorization.authorized || contract.status === 'superseded') {
+    throw new VideoProviderError(
+      authorizationMessage(authorization) || 'Production readiness no longer permits video generation.',
+      'validation',
+      false
+    );
   }
+  const assets = await Asset.find({ projectId: project._id, workspaceId: task.workspaceId! });
+
   const availableAssetIds = new Set(assets.map((asset) => asset._id.toString()));
   if (contract.approvedAssetIds.some((id) => !availableAssetIds.has(id.toString()))) {
     throw new VideoProviderError('An approved input asset is no longer available.', 'validation', false);
@@ -403,6 +438,10 @@ async function processJob(task: IGenerationTask): Promise<void> {
     if (task.providerId && task.providerId !== 'mock') {
       await processRealProviderJob(task, project, contract, leaseId);
       return;
+    }
+    const authorization = await revalidateVideoJobAuthorization(task, project, contract);
+    if (!authorization.authorized) {
+      throw new MockProviderError(authorizationMessage(authorization), 'MOCK_PERMANENT', false);
     }
     const result = await generateMockVideo(
       { projectTitle: project.title, contractVersion: task.contractVersion, mode: task.providerMode || 'success' },

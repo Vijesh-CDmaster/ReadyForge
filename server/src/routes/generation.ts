@@ -16,7 +16,7 @@ import { IAsset, Asset } from '../models/Asset';
 import { Notification } from '../models/Notification';
 import { ProjectMember } from '../models/ProjectMember';
 import { User, wantsNotification } from '../models/User';
-import { computeReadiness } from '../engines/readiness';
+import { evaluateProductionAuthorization } from '../services/productionAuthorization';
 import {
   STAGE_COST,
   STAGE_LABEL,
@@ -184,14 +184,6 @@ function computeLadder(opts: {
   const { project, contract, inputs, conflicts, assets, tasks } = opts;
   const stageIndex = (stage: string) => (LADDER_STAGES as readonly string[]).indexOf(stage);
 
-  const readiness = computeReadiness({ project, inputs, conflicts, assets, contract: contract ?? undefined });
-  const globalBlockers = readiness.blockingIssues.map((b) => b.message);
-
-  if (!contract) globalBlockers.unshift('No Production Contract yet — create and approve one first.');
-  else if (contract.status !== 'approved' && contract.status !== 'locked') {
-    globalBlockers.unshift(`Contract v${contract.version} is ${contract.status} — generation requires an approved contract.`);
-  }
-
   const uncleared = assets.filter(
     (a) => a.licenseStatus === 'unknown' || a.licenseStatus === 'restricted' || a.licenseStatus === 'expired'
   );
@@ -207,9 +199,19 @@ function computeLadder(opts: {
   let previousApproved = true;
 
   for (const stage of LADDER_STAGES) {
+    const authorization = evaluateProductionAuthorization({
+      project,
+      inputs,
+      conflicts,
+      assets,
+      contract,
+      stage,
+      estimatedCost: STAGE_COST[stage] || 0,
+    });
+    const stageBlockers = authorization.blockers.map((blocker) => `${blocker.code}: ${blocker.message}`);
     const task = tasks.find((t) => t.stage === stage) || null;
     const blockers: string[] = [];
-    if (globalBlockers.length) blockers.push(...globalBlockers);
+    if (stageBlockers.length) blockers.push(...stageBlockers);
     if (budgetBlocker) blockers.push(budgetBlocker);
     if (stage !== 'concept' && !previousApproved) {
       const prev = LADDER_STAGES[stageIndex(stage) - 1];
@@ -251,7 +253,10 @@ function computeLadder(opts: {
     previousApproved = state === 'approved';
   }
 
-  return { globalBlockers: Array.from(new Set(globalBlockers)), stages };
+  return {
+    globalBlockers: Array.from(new Set(stages.flatMap((stage) => stage.blockers))),
+    stages,
+  };
 }
 
 async function loadTasks(projectId: unknown) {

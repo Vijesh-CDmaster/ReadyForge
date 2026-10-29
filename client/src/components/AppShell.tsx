@@ -55,6 +55,7 @@ function useTheme() {
 
 /** Human labels for the project sub-routes (kept in sync with ProjectLayout tabs). */
 const TAB_LABELS: Record<string, string> = {
+  knowledge: 'Knowledge',
   inputs: 'AI wizard',
   ledger: 'Ledger',
   conflicts: 'Conflicts',
