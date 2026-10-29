@@ -17,6 +17,7 @@ import { recoverVideoBudgetReservations, reserveVideoBudget } from './videoBudge
 import { refundVideoBudget, settleVideoBudget } from './videoBudget';
 import { downloadAndStoreVideoOutput, removeStoredVideoAsset } from './videoOutput';
 import { VideoProvider, VideoProviderError } from './videoProvider';
+import { BudgetReservation } from '../models/BudgetReservation';
 
 const LEASE_MS = 30_000;
 const POLL_MS = 100;
@@ -60,23 +61,121 @@ export function serializeVideoJob(task: IGenerationTask) {
   };
 }
 
+const MONEY_SCALE = 100;
+
+function moneyInMinorUnits(value: number): number | null {
+  return Number.isFinite(value) && value >= 0 ? Math.round(value * MONEY_SCALE) : null;
+}
+
+function normalizedCurrency(value: string | undefined): string {
+  return (value || '').trim().toUpperCase();
+}
+
+async function validateVideoJobReservation(
+  task: Pick<IGenerationTask, '_id' | 'projectId' | 'estimatedCost'> & {
+    budgetReservationId?: IGenerationTask['budgetReservationId'];
+    costCurrency?: IGenerationTask['costCurrency'];
+  },
+  project: IProject
+) {
+  const estimate = moneyInMinorUnits(task.estimatedCost);
+  if (estimate === null) {
+    throw new VideoProviderError(
+      'invalid_budget_estimate: The queued generation has an invalid estimated cost.',
+      'validation',
+      false
+    );
+  }
+  if (!task.budgetReservationId) {
+    throw new VideoProviderError(
+      'invalid_budget_reservation: The queued generation has no budget reservation.',
+      'validation',
+      false
+    );
+  }
+  if (!Types.ObjectId.isValid(task.budgetReservationId.toString())) {
+    throw new VideoProviderError(
+      'invalid_budget_reservation: The queued generation reservation ID is invalid.',
+      'validation',
+      false
+    );
+  }
+
+  const reservation = await BudgetReservation.findOne({
+    _id: task.budgetReservationId,
+    generationTaskId: task._id,
+    projectId: project._id,
+  });
+  if (!reservation || reservation.status !== 'reserved') {
+    throw new VideoProviderError(
+      `invalid_budget_reservation: The queued generation reservation is ${reservation?.status || 'missing'} and cannot be executed.`,
+      'validation',
+      false
+    );
+  }
+
+  const reservedAmount = moneyInMinorUnits(reservation.estimatedAmount);
+  if (reservedAmount === null || reservedAmount !== estimate) {
+    throw new VideoProviderError(
+      'invalid_budget_reservation: The reservation amount does not match the queued generation estimate.',
+      'validation',
+      false
+    );
+  }
+
+  const projectCurrency = normalizedCurrency(project.budget.currency);
+  const reservationCurrency = normalizedCurrency(reservation.currency);
+  const taskCurrency = normalizedCurrency(task.costCurrency);
+  if (!projectCurrency || !reservationCurrency || !taskCurrency || projectCurrency !== reservationCurrency || taskCurrency !== projectCurrency) {
+    throw new VideoProviderError(
+      'budget_currency_mismatch: The queued generation budget currencies do not match.',
+      'validation',
+      false
+    );
+  }
+
+  const budgetAmount = moneyInMinorUnits(project.budget.amount);
+  const budgetSpent = moneyInMinorUnits(project.budget.spent);
+  if (budgetAmount === null || budgetSpent === null) {
+    throw new VideoProviderError(
+      'invalid_budget_reservation: The project budget is invalid.',
+      'validation',
+      false
+    );
+  }
+
+  // Reservation spending is already included in budget.spent. Remove only this
+  // reservation for the authorization calculation; other spending remains counted.
+  const availableForJob = Math.max(0, budgetAmount - Math.max(0, budgetSpent - reservedAmount)) / MONEY_SCALE;
+  return { reservation, availableForJob };
+}
+
 export async function revalidateVideoJobAuthorization(
-  task: Pick<IGenerationTask, 'projectId' | 'workspaceId'>,
+  task: Pick<IGenerationTask, '_id' | 'projectId' | 'workspaceId' | 'estimatedCost'> & {
+    budgetReservationId?: IGenerationTask['budgetReservationId'];
+    costCurrency?: IGenerationTask['costCurrency'];
+  },
   project: IProject,
   contract: IProductionContract
 ): Promise<ProductionAuthorization> {
+  const { reservation, availableForJob } = await validateVideoJobReservation(task, project);
   const [inputs, conflicts, assets] = await Promise.all([
     KnowledgeInput.find({ projectId: project._id }),
     Conflict.find({ projectId: project._id }),
     Asset.find({ projectId: project._id, workspaceId: task.workspaceId }),
   ]);
+  const estimatedCost = task.estimatedCost;
   return evaluateProductionAuthorization({
-    project,
+    project: {
+      ...project,
+      budget: { ...project.budget, remaining: availableForJob },
+    } as IProject,
     inputs,
     conflicts,
     assets,
     contract,
     stage: 'final',
+    estimatedCost: reservation.estimatedAmount,
   });
 }
 
@@ -177,18 +276,16 @@ export async function submitVideoJob(params: {
       costCurrency: providerEstimate.currency,
       maxAttempts: DEFAULT_MAX_ATTEMPTS,
     });
-    if (providerEstimate.amount > 0) {
-      const reservation = await reserveVideoBudget({
-        projectId: project._id,
-        generationTaskId: task._id,
-        key: `video:${task._id.toString()}`,
-        amount: providerEstimate.amount,
-        currency: providerEstimate.currency,
-      });
-      task.budgetReservationId = reservation._id;
-      task.estimatedCost = providerEstimate.amount;
-      await task.save();
-    }
+    const reservation = await reserveVideoBudget({
+      projectId: project._id,
+      generationTaskId: task._id,
+      key: `video:${task._id.toString()}`,
+      amount: providerEstimate.amount,
+      currency: providerEstimate.currency,
+    });
+    task.budgetReservationId = reservation._id;
+    task.estimatedCost = providerEstimate.amount;
+    await task.save();
     audit({
       workspaceId: params.workspaceId.toString(),
       projectId: project._id.toString(),

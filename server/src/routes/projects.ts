@@ -698,7 +698,7 @@ projectsRouter.post(
         assets: liveCtx.assets,
         contract,
       });
-      project.status = liveReport.blockingIssues.length ? 'blocked' : 'ready';
+      project.status = liveReport.productionAuthorization.authorized ? 'ready' : 'blocked';
       await project.save();
     }
     await contract.save();

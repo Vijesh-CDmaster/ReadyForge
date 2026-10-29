@@ -10,6 +10,7 @@ import { ProductionContract } from '../models/ProductionContract';
 import { GenerationTask } from '../models/GenerationTask';
 import { Asset } from '../models/Asset';
 import { Conflict } from '../models/Conflict';
+import { BudgetReservation } from '../models/BudgetReservation';
 import { signAccessToken } from '../middleware/auth';
 import { processRealProviderJob, revalidateVideoJobAuthorization, submitVideoJob, VideoJobWorker } from '../services/videoJobs';
 import { evaluateProductionAuthorization } from '../services/productionAuthorization';
@@ -94,6 +95,26 @@ function fakeProvider(onSubmit: () => void): VideoProvider {
       };
     },
   };
+}
+
+async function attachReservation(
+  task: InstanceType<typeof GenerationTask>,
+  project: InstanceType<typeof Project>,
+  options: { status?: string; amount?: number; currency?: string; projectId?: Types.ObjectId; taskId?: Types.ObjectId } = {}
+) {
+  const reservation = await BudgetReservation.create({
+    projectId: options.projectId || project._id,
+    generationTaskId: options.taskId || task._id,
+    key: `video:test-${task._id.toString()}-${Math.random()}`,
+    estimatedAmount: options.amount ?? task.estimatedCost,
+    actualAmount: 0,
+    currency: options.currency || 'INR',
+    status: options.status || 'reserved',
+  });
+  task.budgetReservationId = reservation._id;
+  task.costCurrency = options.currency || 'INR';
+  await task.save();
+  return reservation;
 }
 
 beforeAll(async () => {
@@ -243,6 +264,7 @@ describe('durable mock video jobs', () => {
       leaseExpiresAt: new Date(Date.now() + 30_000),
       idempotencyKey: 'boundary-invalid',
     });
+    await attachReservation(task, project);
     let submitCalls = 0;
     const provider = fakeProvider(() => {
       submitCalls += 1;
@@ -253,6 +275,331 @@ describe('durable mock video jobs', () => {
     });
     expect(submitCalls).toBe(0);
     await expired.deleteOne();
+  });
+
+  it('rejects a queued job when the current budget no longer covers its stored estimate', async () => {
+    const { user, workspace, project, contract } = await setup();
+    const task = await GenerationTask.create({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      contractId: contract._id,
+      contractVersion: contract.version,
+      createdById: user._id,
+      taskType: 'final',
+      stage: 'final',
+      status: 'running',
+      leaseId: 'budget-invalid',
+      leaseExpiresAt: new Date(Date.now() + 30_000),
+      idempotencyKey: 'budget-invalid',
+      estimatedCost: 20,
+      costCurrency: 'INR',
+    });
+    const reservation = await BudgetReservation.create({
+      projectId: project._id,
+      generationTaskId: task._id,
+      key: 'video:budget-invalid',
+      estimatedAmount: 20,
+      actualAmount: 0,
+      currency: 'INR',
+      status: 'reserved',
+    });
+    task.budgetReservationId = reservation._id;
+    await task.save();
+    project.budget.amount = 10;
+    project.budget.spent = 10;
+    project.budget.remaining = 0;
+    await project.save();
+
+    let submitCalls = 0;
+    const provider = fakeProvider(() => {
+      submitCalls += 1;
+    });
+    await expect(processRealProviderJob(task, project, contract, 'budget-invalid', provider)).rejects.toMatchObject({
+      kind: 'validation',
+      message: expect.stringContaining('budget_exceeded'),
+    });
+    expect(submitCalls).toBe(0);
+  });
+
+  it('allows a queued job to reach the provider when its reserved estimate remains funded', async () => {
+    const { user, workspace, project, contract } = await setup();
+    const task = await GenerationTask.create({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      contractId: contract._id,
+      contractVersion: contract.version,
+      createdById: user._id,
+      taskType: 'final',
+      stage: 'final',
+      status: 'running',
+      leaseId: 'budget-valid',
+      leaseExpiresAt: new Date(Date.now() + 30_000),
+      idempotencyKey: 'budget-valid',
+      estimatedCost: 20,
+      costCurrency: 'INR',
+    });
+    const reservation = await BudgetReservation.create({
+      projectId: project._id,
+      generationTaskId: task._id,
+      key: 'video:budget-valid',
+      estimatedAmount: 20,
+      actualAmount: 0,
+      currency: 'INR',
+      status: 'reserved',
+    });
+    task.budgetReservationId = reservation._id;
+    await task.save();
+    project.budget.spent = 20;
+    project.budget.remaining = 80;
+    await project.save();
+
+    let submitCalls = 0;
+    const provider = fakeProvider(() => {
+      submitCalls += 1;
+    });
+    await expect(processRealProviderJob(task, project, contract, 'budget-valid', provider)).rejects.toMatchObject({
+      kind: 'provider',
+    });
+    expect(submitCalls).toBe(1);
+  });
+
+  it.each([
+    ['pending', 'pending'],
+    ['settling', 'settling'],
+    ['settled', 'settled'],
+    ['refunding', 'refunding'],
+    ['refunded', 'refunded'],
+    ['manual_review', 'manual_review'],
+    ['released', 'released'],
+    ['unsupported', 'unsupported'],
+  ])('fails closed for a %s reservation state', async (_label, status) => {
+    const { user, workspace, project, contract } = await setup();
+    const task = await GenerationTask.create({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      contractId: contract._id,
+      contractVersion: contract.version,
+      createdById: user._id,
+      taskType: 'final',
+      stage: 'final',
+      status: 'running',
+      leaseId: `invalid-state-${status}`,
+      leaseExpiresAt: new Date(Date.now() + 30_000),
+      idempotencyKey: `invalid-state-${status}`,
+      estimatedCost: 20,
+      costCurrency: 'INR',
+    });
+    if (status === 'released' || status === 'unsupported') {
+      const reservation = {
+        projectId: project._id,
+        generationTaskId: task._id,
+        key: `video:invalid-state-${status}`,
+        estimatedAmount: 20,
+        actualAmount: 0,
+        currency: 'INR',
+        status,
+      };
+      const inserted = await BudgetReservation.collection.insertOne(reservation);
+      task.budgetReservationId = inserted.insertedId;
+      await task.save();
+    } else {
+      await attachReservation(task, project, { status });
+    }
+    await expect(
+      processRealProviderJob(task, project, contract, task.leaseId!, fakeProvider(() => undefined))
+    ).rejects.toMatchObject({
+      kind: 'validation',
+      message: expect.stringContaining('invalid_budget_reservation'),
+    });
+  });
+
+  it('fails closed for missing, mismatched, and invalid reservation invariants', async () => {
+    const cases = [
+      { name: 'missing reservation id', taskChange: (task: any) => { task.budgetReservationId = undefined; }, expected: 'invalid_budget_reservation' },
+      { name: 'reservation not found', taskChange: (task: any) => { task.budgetReservationId = new Types.ObjectId(); }, expected: 'invalid_budget_reservation' },
+      { name: 'wrong task', reservation: { taskId: new Types.ObjectId() }, expected: 'invalid_budget_reservation' },
+      { name: 'wrong project', reservation: { projectId: new Types.ObjectId() }, expected: 'invalid_budget_reservation' },
+      { name: 'amount mismatch', reservation: { amount: 19 }, expected: 'invalid_budget_reservation' },
+      { name: 'currency mismatch', reservation: { currency: 'USD' }, expected: 'budget_currency_mismatch' },
+    ];
+    for (const testCase of cases) {
+      const { user, workspace, project, contract } = await setup();
+      const task = await GenerationTask.create({
+        projectId: project._id,
+        workspaceId: workspace._id,
+        contractId: contract._id,
+        contractVersion: contract.version,
+        createdById: user._id,
+        taskType: 'final',
+        stage: 'final',
+        status: 'running',
+        leaseId: `invariant-${testCase.name}`,
+        leaseExpiresAt: new Date(Date.now() + 30_000),
+        idempotencyKey: `invariant-${testCase.name}`,
+        estimatedCost: 20,
+        costCurrency: 'INR',
+      });
+      if (testCase.taskChange) {
+        testCase.taskChange(task);
+        await task.save();
+      } else {
+        await attachReservation(task, project, {
+          amount: testCase.reservation?.amount,
+          currency: testCase.reservation?.currency,
+          taskId: testCase.reservation?.taskId,
+          projectId: testCase.reservation?.projectId,
+        });
+      }
+      await expect(
+        processRealProviderJob(task, project, contract, task.leaseId!, fakeProvider(() => undefined))
+      ).rejects.toMatchObject({
+        kind: 'validation',
+        message: expect.stringContaining(testCase.expected),
+      });
+    }
+  });
+
+  it.each([NaN, Infinity, -1])('fails closed for an invalid stored estimate: %s', async (estimate) => {
+    const { user, workspace, project, contract } = await setup();
+    const task = await GenerationTask.create({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      contractId: contract._id,
+      contractVersion: contract.version,
+      createdById: user._id,
+      taskType: 'final',
+      stage: 'final',
+      status: 'running',
+      leaseId: `invalid-estimate-${String(estimate)}`,
+      leaseExpiresAt: new Date(Date.now() + 30_000),
+      idempotencyKey: `invalid-estimate-${String(estimate)}`,
+      estimatedCost: 20,
+      costCurrency: 'INR',
+    });
+    await attachReservation(task, project);
+    const executionTask = task.toObject();
+    executionTask.estimatedCost = estimate;
+    await expect(
+      processRealProviderJob(executionTask, project, contract, task.leaseId!, fakeProvider(() => undefined))
+    ).rejects.toMatchObject({
+      kind: 'validation',
+      message: expect.stringContaining('invalid_budget_estimate'),
+    });
+  });
+
+  it('rejects a queued job when a required approval becomes pending', async () => {
+    const { user, workspace, project, contract } = await setup();
+    contract.requiredApprovals = [{ userId: user._id, role: 'reviewer', status: 'pending' }];
+    await contract.save();
+    const task = await GenerationTask.create({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      contractId: contract._id,
+      contractVersion: contract.version,
+      createdById: user._id,
+      taskType: 'final',
+      stage: 'final',
+      status: 'running',
+      leaseId: 'approval-invalid',
+      leaseExpiresAt: new Date(Date.now() + 30_000),
+      idempotencyKey: 'approval-invalid',
+    });
+    await attachReservation(task, project);
+    let submitCalls = 0;
+    const provider = fakeProvider(() => {
+      submitCalls += 1;
+    });
+    await expect(processRealProviderJob(task, project, contract, 'approval-invalid', provider)).rejects.toMatchObject({
+      kind: 'validation',
+      message: expect.stringContaining('pending_contract_approvals'),
+    });
+    expect(submitCalls).toBe(0);
+  });
+
+  it('rejects a queued job when a high-severity conflict is introduced', async () => {
+    const { user, workspace, project, contract } = await setup();
+    await Conflict.create({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      title: 'New final conflict',
+      description: 'A new conflict appeared after queueing.',
+      severity: 'high',
+      status: 'open',
+      conflictType: 'factual',
+      detectedBy: 'system',
+    });
+    const task = await GenerationTask.create({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      contractId: contract._id,
+      contractVersion: contract.version,
+      createdById: user._id,
+      taskType: 'final',
+      stage: 'final',
+      status: 'running',
+      leaseId: 'conflict-invalid',
+      leaseExpiresAt: new Date(Date.now() + 30_000),
+      idempotencyKey: 'conflict-invalid',
+    });
+    await attachReservation(task, project);
+    let submitCalls = 0;
+    const provider = fakeProvider(() => {
+      submitCalls += 1;
+    });
+    await expect(processRealProviderJob(task, project, contract, 'conflict-invalid', provider)).rejects.toMatchObject({
+      kind: 'validation',
+      message: expect.stringContaining('high_conflict'),
+    });
+    expect(submitCalls).toBe(0);
+  });
+
+  it('rejects a superseded queued contract before provider submission', async () => {
+    const { user, workspace, project, contract } = await setup();
+    contract.status = 'superseded';
+    await contract.save();
+    const task = await GenerationTask.create({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      contractId: contract._id,
+      contractVersion: contract.version,
+      createdById: user._id,
+      taskType: 'final',
+      stage: 'final',
+      status: 'running',
+      leaseId: 'contract-invalid',
+      leaseExpiresAt: new Date(Date.now() + 30_000),
+      idempotencyKey: 'contract-invalid',
+    });
+    await attachReservation(task, project);
+    let submitCalls = 0;
+    const provider = fakeProvider(() => {
+      submitCalls += 1;
+    });
+    await expect(processRealProviderJob(task, project, contract, 'contract-invalid', provider)).rejects.toMatchObject({
+      kind: 'validation',
+    });
+    expect(submitCalls).toBe(0);
+  });
+
+  it('does not mark a project ready when contract approval leaves authorization blockers', async () => {
+    const { user, project, contract } = await setup();
+    project.description = 'Food recipe video';
+    await project.save();
+    contract.status = 'pending_approval';
+    contract.requiredApprovals = [];
+    await contract.save();
+
+    const response = await fetch(`${baseUrl}/api/projects/${project._id}/contract/approve`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${signAccessToken(user)}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    });
+    expect(response.status).toBe(200);
+    const freshProject = await Project.findById(project._id);
+    expect(freshProject?.status).toBe('blocked');
   });
 
   it('allows valid real-provider worker evidence to reach the provider', async () => {
@@ -270,6 +617,7 @@ describe('durable mock video jobs', () => {
       leaseExpiresAt: new Date(Date.now() + 30_000),
       idempotencyKey: 'boundary-valid',
     });
+    await attachReservation(task, project);
     let submitCalls = 0;
     const provider = fakeProvider(() => {
       submitCalls += 1;
@@ -320,8 +668,22 @@ describe('durable mock video jobs', () => {
       mimeType: 'image/png',
       licenseStatus: 'expired',
     });
+    const task = await GenerationTask.create({
+      projectId: project._id,
+      workspaceId: workspace._id,
+      contractId: contract._id,
+      contractVersion: contract.version,
+      createdById: user._id,
+      taskType: 'final',
+      stage: 'final',
+      status: 'running',
+      leaseId: 'boundary-revalidation',
+      leaseExpiresAt: new Date(Date.now() + 30_000),
+      idempotencyKey: 'boundary-revalidation',
+    });
+    await attachReservation(task, project);
     const authorization = await revalidateVideoJobAuthorization(
-      { projectId: project._id, workspaceId: workspace._id },
+      task,
       project,
       contract
     );
@@ -371,6 +733,9 @@ describe('durable mock video jobs', () => {
       mode: 'success',
       idempotencyKey: 'success-key',
     });
+    const reservationsBeforeWorker = await BudgetReservation.countDocuments({ generationTaskId: task._id });
+    expect(reservationsBeforeWorker).toBe(1);
+    expect(task.budgetReservationId).toBeDefined();
     const workerA = new VideoJobWorker();
     const workerB = new VideoJobWorker();
     workerA.start();
@@ -384,6 +749,7 @@ describe('durable mock video jobs', () => {
     expect(completed.outputText).toContain('NOT A PLAYABLE MP4');
     const freshProject = await Project.findById(project._id);
     expect(freshProject?.budget.spent).toBe(0);
+    expect(await BudgetReservation.countDocuments({ generationTaskId: task._id })).toBe(1);
   });
 
   it('does not let an expired lease overwrite a newer worker result', async () => {
@@ -403,6 +769,7 @@ describe('durable mock video jobs', () => {
       mockOutput: true,
       providerMode: 'success',
     });
+    await attachReservation(task, project);
     const worker = new VideoJobWorker();
     worker.start();
     const recovered = await waitForStatus(task._id, 'requires_approval');

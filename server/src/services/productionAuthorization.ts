@@ -35,7 +35,13 @@ export function evaluateProductionAuthorization(opts: {
       (stage === 'final' || !['unlicensed_asset', 'uncleared_assets'].includes(blocker.code))
   );
 
-  if (estimatedCost > 0) {
+  if (!Number.isFinite(estimatedCost) || estimatedCost < 0) {
+    blockers.push({
+      severity: 'blocker',
+      code: 'invalid_budget_estimate',
+      message: 'The queued generation has an invalid estimated cost.',
+    });
+  } else if (estimatedCost > 0) {
     if (!project.budget.amount) {
       blockers.push({
         severity: 'blocker',
