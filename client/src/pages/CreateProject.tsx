@@ -92,7 +92,7 @@ export default function CreateProject() {
         mode: values.mode,
         projectType: values.projectType,
         objective: values.objective || undefined,
-        budget: values.budgetAmount ? { amount: values.budgetAmount, currency: 'INR' } : undefined,
+        budget: values.budgetAmount != null ? { amount: values.budgetAmount, currency: 'INR' } : undefined,
         // The server fills any brief fields left empty from this template.
         templateId: templateId || undefined,
       }),
@@ -198,7 +198,7 @@ export default function CreateProject() {
             </Select>
           </Field>
 
-          <Field label="One-sentence description" error={form.formState.errors.title?.message}>
+          <Field label="Project title" error={form.formState.errors.title?.message}>
             <Input
               placeholder="Make a 20-second ad for my handmade candle shop."
               {...form.register('title')}
