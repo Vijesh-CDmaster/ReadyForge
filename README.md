@@ -23,13 +23,16 @@ React SPA (Vite :5173)  ──REST/JSON──►  Express API (:4000)  ──►
                                                                             └── DistilBERT-MNLI (contradiction detection)
 ```
 
-All AI is **self-hosted and keyless** — no OpenAI/Anthropic key required. If the AI service is
-down, the backend fails soft to a deterministic rule engine, so the app keeps working.
+The default local AI service is **self-hosted and keyless**. Any OpenAI-compatible endpoint can
+be configured instead; without a reachable model, the backend fails soft to a deterministic rule
+engine so the rest of the application keeps working.
 
 ## Prerequisites
 
 - Node.js 20+ and npm
-- Python 3.10+ (for the AI service)
+- Python 3.10+ (optional, for the local AI service)
+- FFmpeg and FFprobe with `libx264` and AAC for local MP4 rendering. Non-render features work
+  without them; set `FFMPEG_PATH` / `FFPROBE_PATH` if the executables are not on `PATH`.
 - MongoDB — a free [Atlas](https://www.mongodb.com/atlas) cluster, **or** nothing: with no
   `MONGODB_URI` the server starts a local file-backed MongoDB automatically (`server/.data`)
 
@@ -51,9 +54,11 @@ npm run dev
 - Web app: http://localhost:5173
 - API: http://localhost:4000/api/health
 
-A fresh database is **seeded automatically on first start** with demo users, a workspace,
-two projects, knowledge inputs, an open conflict, assets, an approved Production Contract,
-generation history and a verification report.
+A fresh database is **seeded automatically on first start** with two demo workspaces and three
+projects: the Inkloom campaign demo, plus the render-ready **Studio Demo**. The seed also creates
+knowledge inputs, one open campaign conflict, one resolved Studio conflict, assets, an approved
+Production Contract, a locked Studio Contract, generation history and a verification report. See
+[docs/STUDIO_DEMO.md](docs/STUDIO_DEMO.md) for the Studio path.
 
 ## Environment variables (`server/.env`)
 
@@ -70,6 +75,11 @@ generation history and a verification report.
 | `LOCAL_AI_URL` | no | — | Custom-protocol AI endpoints (NLI conflict/claim checks): `http://127.0.0.1:8001` |
 | `MAX_UPLOAD_MB` | no | `25` | Upload size limit |
 | `SEED_ON_START` | no | `true` | Set `false` to disable auto-seeding |
+| `VIDEO_PROVIDER` | no | `mock` | Legacy async provider (`mock` or `runway`); local MP4 rendering uses FFmpeg directly |
+| `FFMPEG_PATH` | no | `ffmpeg` on PATH | FFmpeg executable used by the local renderer |
+| `FFPROBE_PATH` | no | `ffprobe` on PATH | FFprobe executable used for media validation |
+| `VIDEO_RENDER_TIMEOUT_MS` | no | `300000` | Hard limit for one local FFmpeg render |
+| `VIDEO_MAX_COST_USD` | no | `0` | Fail-closed cost cap for paid Runway jobs; `0` disables paid execution |
 
 > Never commit `server/.env` — it is gitignored. Secrets stay on the server; the frontend never
 > sees them.
@@ -100,48 +110,58 @@ Then point `server/.env` at it (values above). Verify with `curl http://127.0.0.
 | `npm run dev` | API (`tsx watch`) + web (`vite`) together |
 | `npm run build` | Build server + client for production |
 | `npm run typecheck` | `tsc --noEmit` for both workspaces |
-| `npm run seed` | (Re)run the demo seed — also backfills contract/generation data into older demo DBs |
+| `npm test` | Client component tests |
+| `npm run test:server` | Server unit and integration tests |
+| `npm run lint` | ESLint across the repository |
+| `npm run seed` | (Re)run the demo seed — also backfills contract/generation data and reconciles Studio Demo |
+| `npm run seed:studio` | Idempotently seed the render-ready Studio Demo project — see [docs/STUDIO_DEMO.md](docs/STUDIO_DEMO.md) |
 | `npx tsx seed-selftest.ts` (in `server/`) | Runs the seed against a throwaway in-memory MongoDB and asserts the demo data shape |
 
-## Asynchronous video jobs (mock only)
+## Video generation and local rendering
 
-Phase 2 provides a durable MongoDB-backed job flow for future video providers. The API enqueues
-jobs only after the project has an approved or locked Production Contract:
+There are two distinct paths; do not confuse them.
 
-- `POST /api/projects/:projectId/video-jobs` — enqueue a job; send an `Idempotency-Key` header
-- `GET /api/projects/:projectId/video-jobs` — list authorized project jobs
-- `GET /api/projects/:projectId/video-jobs/:jobId` — read authorized status and progress
-- `POST /api/projects/:projectId/video-jobs/:jobId/retry` — retry an eligible failed job
-- `POST /api/projects/:projectId/video-jobs/:jobId/cancel` — cancel a queued job
+**Local MP4 rendering (implemented).** The editor saves a multi-track composition through
+`PUT /api/projects/:id/composition`, then submits `POST /api/projects/:id/renders` with an
+`Idempotency-Key`. The normal worker validates readiness, the locked Production Contract, rights
+and budget before running local FFmpeg. The result is H.264/AAC MP4 stored as a protected project
+asset and served only through `GET /api/assets/:id/file`. Text overlays, transitions, audio fades,
+multiple video/audio tracks and SRT-derived text clips are rendered by the local pipeline.
+Rendering is unavailable, with a clear error, when FFmpeg/FFprobe or the required encoders are
+missing.
 
-The API process starts the polling worker automatically. Jobs are atomically claimed with a lease,
-heartbeat updates, stale-lease recovery, bounded retries, and lease ownership checks before
-progress or completion writes. The current provider is deterministic and offline: its output is
+**Legacy asynchronous provider jobs.** The API also exposes a durable provider-job flow:
+
+- `POST /api/projects/:id/video-jobs` — enqueue a job; send an `Idempotency-Key` header
+- `GET /api/projects/:id/video-jobs` — list authorized project jobs
+- `GET /api/projects/:id/video-jobs/:jobId` — read authorized status and progress
+- `POST /api/projects/:id/video-jobs/:jobId/retry` — retry an eligible failed job
+- `POST /api/projects/:id/video-jobs/:jobId/cancel` — cancel a queued job
+
+Jobs are atomically claimed with a lease, heartbeat updates, stale-lease recovery, bounded
+retries, and lease ownership checks. `VIDEO_PROVIDER=mock` is the offline default; its output is
 explicitly labelled as a non-playable mock artifact and is never treated as approved production
-media. Real-provider billing, MP4 generation, and separate worker deployment are not implemented.
+media. Runway is fail-closed unless `VIDEO_PROVIDER=runway`, `RUNWAY_API_KEY`,
+`RUNWAY_ESTIMATED_COST_USD`, and `VIDEO_MAX_COST_USD` are explicitly set. Paid provider execution
+and separate worker deployment are **not** implemented. Provider credentials are server-only and
+must never be placed in client configuration or committed to `.env.example`.
 
-Runway integration is currently an adapter and is fail-closed unless `VIDEO_PROVIDER=runway`,
-`RUNWAY_API_KEY`, `RUNWAY_ESTIMATED_COST_USD`, and `VIDEO_MAX_COST_USD` are explicitly set.
-Keep `VIDEO_PROVIDER=mock` for local development and tests. Provider credentials are server-only;
-they must never be placed in client configuration or committed to `.env.example`.
-
-Video reservations now use durable, per-project operation markers: the marker and budget counter
-change are committed in one MongoDB update, while a worker recovery pass repairs reservation
-state after a process crash. Repeated settlement and refund operations are idempotent. This
-removes the previous duplicate-counter window for video reservations, but paid execution remains
-intentionally disabled until the complete real-provider acceptance flow is audited end to end.
-Runway provider submission failures with unknown outcomes are recorded as
-manual-reconciliation cases rather than blindly retried. Cancellation is only supported for
-queued ReadyForge jobs; running provider jobs are reported as advisory/non-cancellable unless the
-provider contract is explicitly verified.
+Video reservations use durable per-project operation markers: the marker and budget counter change
+are committed in one MongoDB update, while worker recovery repairs reservation state after a
+crash. Repeated settlement and refund operations are idempotent. Runway submissions with unknown
+outcomes are recorded for manual reconciliation rather than blindly retried.
 
 ## Demo instructions
 
-1. Start everything (`npm run dev` + AI service) and open http://localhost:5173.
+1. Start everything (`npm run dev` + optional AI service) and open http://localhost:5173.
 2. Sign in with the seeded accounts:
    - **Owner:** `demo@readyforge.ai` / `demo1234`
    - **Lead:** `lead@readyforge.ai` / `demo1234`
-3. **3-minute tour (Judge Mode):** Dashboard → **Simulate Risky Campaign** loads a project with
+3. **Studio Demo (render path):** Open **ReadyForge Studio** → **Studio Demo — Product Launch
+   Film**, review the ledger, resolved conflict, rights and locked Contract, then open **Video
+   editor** and click **Render MP4**. Follow [docs/STUDIO_DEMO.md](docs/STUDIO_DEMO.md) for the
+   full sequence.
+4. **3-minute tour (Judge Mode):** Dashboard → **Simulate Risky Campaign** loads a project with
    conflicting price inputs, an unsupported growth claim, an unlicensed asset and a high Waste
    Receipt. Then:
    - **Cost at Risk** — Waste Receipt + Campaign Risk Score (rework probability × planned cost)

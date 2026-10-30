@@ -2,6 +2,7 @@ import { IProject } from '../models/Project';
 import { IKnowledgeInput } from '../models/KnowledgeInput';
 import { IConflict } from '../models/Conflict';
 import { IAsset } from '../models/Asset';
+import { computePlannedStageCost } from './stageCost';
 
 export interface WasteReceipt {
   /** What waste looks like if the team renders right now. */
@@ -46,9 +47,10 @@ export function computeCostAtRisk(opts: {
 }): CostAtRiskReport {
   const { project, inputs, conflicts, assets, regenerationRate = 0 } = opts;
 
-  const stageCosts: Record<string, number> = { concept: 50, script: 200, storyboard: 450, preview: 700, final: 900 };
-  const base = stageCosts[project.projectType] ?? 300;
-  const plannedCost = Math.round(base * (project.currentStage === 'final' ? 1 : 0.7) + 100);
+  // Planned cost follows the shared production ladder, not the deliverable
+  // type. A storyboard costs more to produce than a concept even for the same
+  // project, and Readiness uses the same ladder for budget feasibility.
+  const plannedCost = computePlannedStageCost(project.currentStage);
 
   const reasons: string[] = [];
   const recommendedActions: string[] = [];

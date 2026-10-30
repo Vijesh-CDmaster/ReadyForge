@@ -10,6 +10,7 @@ import { Conflict } from './models/Conflict';
 import { Asset } from './models/Asset';
 import { Notification } from './models/Notification';
 import { ensureDemoPipeline, topUpDemoPipeline } from './demoPipeline';
+import { ensureStudioDemo } from './demoStudio';
 import { config } from './config';
 
 const UPLOADS = path.resolve(config.upload.dir);
@@ -64,12 +65,21 @@ function writeSilentWav(): string {
   return '/uploads/demo-track.wav';
 }
 
+async function ensureSeedStudioDemo(): Promise<void> {
+  const studio = await ensureStudioDemo();
+  if (studio.skipped) {
+    throw new Error(`Studio Demo could not be prepared: ${studio.reason ?? 'unknown media error'}`);
+  }
+}
+
 export async function seed(): Promise<void> {
   const existing = await User.findOne({ email: 'demo@readyforge.ai' });
   if (existing) {
     // Older demo databases may lack the contract/generation stage — backfill it.
     await topUpDemoPipeline();
-    console.log('[seed] demo data already present — skipping');
+    // The Studio Demo is idempotent and is also added to existing demo databases.
+    await ensureSeedStudioDemo();
+    console.log('[seed] demo data already present — Studio Demo reconciled');
     return;
   }
 
@@ -306,6 +316,8 @@ export async function seed(): Promise<void> {
       confidence: 0.7,
     },
   ]);
+
+  await ensureSeedStudioDemo();
 
   console.log('[seed] demo data created');
   console.log('[seed]   demo@readyforge.ai / demo1234 (owner)');

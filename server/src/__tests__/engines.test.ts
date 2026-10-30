@@ -285,6 +285,99 @@ describe('readiness engine', () => {
   });
 });
 
+describe('shared production-stage cost ladder', () => {
+  const stages = ['concept', 'script', 'storyboard', 'preview', 'final'] as const;
+  const expected = [135, 240, 415, 590, 1000];
+
+  it('prices readiness budget feasibility from the production stage, not the project type', () => {
+    stages.forEach((currentStage, index) => {
+      const readiness = computeReadiness({
+        project: project({ projectType: 'video', currentStage }),
+        inputs: [],
+        conflicts: [],
+        assets: [],
+      });
+      const cost = computeCostAtRisk({
+        project: project({ projectType: 'video', currentStage }),
+        inputs: [],
+        conflicts: [],
+        assets: [],
+      });
+
+      expect(readiness.categories.find((category) => category.key === 'budget')).toEqual(
+        expect.objectContaining({
+          score: 5,
+          reason: `Remaining 5000 covers planned ${expected[index]}`,
+        })
+      );
+      expect(cost.plannedCost).toBe(expected[index]);
+    });
+  });
+
+  it('gives video and ad projects identical values at the same stage', () => {
+    const readinessFor = (projectType: string) =>
+      computeReadiness({
+        project: project({ projectType, currentStage: 'script' }),
+        inputs: [],
+        conflicts: [],
+        assets: [],
+      }).categories.find((category) => category.key === 'budget');
+    const costFor = (projectType: string) =>
+      computeCostAtRisk({
+        project: project({ projectType, currentStage: 'script' }),
+        inputs: [],
+        conflicts: [],
+        assets: [],
+      }).plannedCost;
+
+    expect(readinessFor('video')).toEqual(readinessFor('ad'));
+    expect(readinessFor('video')?.reason).toBe('Remaining 5000 covers planned 240');
+    expect(costFor('video')).toBe(240);
+    expect(costFor('ad')).toBe(240);
+  });
+
+  it('uses the same safe fallback for missing and unknown stages in both engines', () => {
+    for (const currentStage of [undefined, 'contract_review'] as const) {
+      const readiness = computeReadiness({
+        project: project({ projectType: 'video', currentStage }),
+        inputs: [],
+        conflicts: [],
+        assets: [],
+      });
+      const cost = computeCostAtRisk({
+        project: project({ projectType: 'video', currentStage }),
+        inputs: [],
+        conflicts: [],
+        assets: [],
+      });
+
+      expect(readiness.categories.find((category) => category.key === 'budget')?.reason).toBe(
+        'Remaining 5000 covers planned 310'
+      );
+      expect(cost.plannedCost).toBe(310);
+    }
+  });
+
+  it('preserves the budget-feasibility threshold at the stage price', () => {
+    const atThreshold = computeReadiness({
+      project: project({ currentStage: 'final', budget: { amount: 1000, spent: 0, remaining: 1000, currency: 'INR' } }),
+      inputs: [],
+      conflicts: [],
+      assets: [],
+    });
+    const belowThreshold = computeReadiness({
+      project: project({ currentStage: 'final', budget: { amount: 1000, spent: 1, remaining: 999, currency: 'INR' } }),
+      inputs: [],
+      conflicts: [],
+      assets: [],
+    });
+
+    expect(atThreshold.categories.find((category) => category.key === 'budget')?.score).toBe(5);
+    expect(belowThreshold.categories.find((category) => category.key === 'budget')?.score).toBe(2);
+    expect(belowThreshold.warnings.some((warning) => warning.code === 'budget_tight')).toBe(true);
+  });
+});
+
 describe('cost-at-risk / waste receipt', () => {
   it('produces zero-waste floor for a clean project', () => {
     const r = computeCostAtRisk({ project: project(), inputs: [input()], conflicts: [], assets: [] });
@@ -303,6 +396,44 @@ describe('cost-at-risk / waste receipt', () => {
     expect(r.receipt.ifRenderNow.expectedWaste).toBe(
       Math.round(r.receipt.ifRenderNow.renderCost * r.receipt.ifRenderNow.reworkProbability)
     );
+  });
+
+  it('prices planned cost from the production stage, not the project type', () => {
+    const stages = ['concept', 'script', 'storyboard', 'preview', 'final'] as const;
+    const reports = stages.map((currentStage) =>
+      computeCostAtRisk({ project: project({ currentStage }), inputs: [], conflicts: [], assets: [] })
+    );
+
+    expect(reports.map((report) => report.plannedCost)).toEqual([135, 240, 415, 590, 1000]);
+    expect(reports.map((report) => report.plannedCost)).toEqual(
+      [...reports.map((report) => report.plannedCost)].sort((a, b) => a - b)
+    );
+    expect(reports[4].receipt.ifRenderNow.renderCost).toBe(1000);
+
+    const videoAtScript = computeCostAtRisk({
+      project: project({ projectType: 'video', currentStage: 'script' }),
+      inputs: [],
+      conflicts: [],
+      assets: [],
+    });
+    const adAtScript = computeCostAtRisk({
+      project: project({ projectType: 'ad', currentStage: 'script' }),
+      inputs: [],
+      conflicts: [],
+      assets: [],
+    });
+    expect(videoAtScript.plannedCost).toBe(240);
+    expect(adAtScript.plannedCost).toBe(240);
+  });
+
+  it('falls back safely for an unknown stage', () => {
+    const r = computeCostAtRisk({
+      project: project({ currentStage: 'contract_review' }),
+      inputs: [],
+      conflicts: [],
+      assets: [],
+    });
+    expect(r.plannedCost).toBe(310);
   });
 
   it('increases rework probability when conflicts are unresolved', () => {

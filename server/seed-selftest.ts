@@ -41,7 +41,7 @@ async function main() {
   const contract = await ProductionContract.findOne({ status: 'approved' });
   const checks = (await VerificationReport.findOne({}))?.checks.map((c) => c.checkType) ?? [];
 
-  const expected = { users: 2, workspaces: 1, projects: 2, inputs: 12, conflicts: 1, assets: 3, contracts: 1, tasks: 2, reports: 1, reviews: 2 };
+  const expected = { users: 2, workspaces: 2, projects: 3, inputs: 24, conflicts: 2, assets: 6, contracts: 2, tasks: 2, reports: 1, reviews: 2 };
   const actual = { users, workspaces, projects, inputs, conflicts, assets, contracts, tasks, reports, reviews };
 
   let failed = 0;
@@ -63,8 +63,11 @@ async function main() {
   // Idempotency: running again must be a no-op.
   await seed();
   const contractsAfter = await ProductionContract.countDocuments();
-  console.log(`${contractsAfter === 1 ? 'PASS' : 'FAIL'} seed idempotent (contracts still ${contractsAfter})`);
-  if (contractsAfter !== 1) failed++;
+  console.log(`${contractsAfter === 2 ? 'PASS' : 'FAIL'} seed idempotent (contracts still ${contractsAfter})`);
+  if (contractsAfter !== 2) failed++;
+  const studio = await ProductionContract.findOne({ status: 'locked' });
+  console.log(`${studio ? 'PASS' : 'FAIL'} Studio Demo contract locked`);
+  if (!studio) failed++;
 
   await mongoose.disconnect();
   await mem.stop();

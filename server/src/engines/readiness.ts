@@ -3,6 +3,7 @@ import { IKnowledgeInput } from '../models/KnowledgeInput';
 import { IConflict } from '../models/Conflict';
 import { IAsset } from '../models/Asset';
 import { IProductionContract } from '../models/ProductionContract';
+import { computePlannedStageCost } from './stageCost';
 
 export interface ReadinessCategory {
   key: string;
@@ -245,7 +246,7 @@ export function computeReadiness(opts: {
   }
 
   /* ---- Budget feasibility (5%) ---- */
-  const plannedCost = estimatePlannedCost(project);
+  const plannedCost = computePlannedStageCost(requiredStage);
   const budgetFeasible = hasBudget && project.budget.remaining >= plannedCost;
   const budgetScore = !hasBudget ? 0 : budgetFeasible ? 5 : 2;
   if (!hasBudget) {
@@ -349,19 +350,6 @@ export function computeReadiness(opts: {
     generatedAt: new Date(),
     source: 'rule_engine',
   };
-}
-
-function estimatePlannedCost(project: IProject): number {
-  const base: Record<string, number> = {
-    video: 900,
-    ad: 700,
-    social_post: 150,
-    blog: 200,
-    presentation: 350,
-    landing_page: 400,
-    custom: 300,
-  };
-  return base[project.projectType] ?? 300;
 }
 
 function assessCategoryRubric(opts: {
