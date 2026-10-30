@@ -9,6 +9,46 @@ import { renderComposition, runProcess } from '../services/compositionRenderer';
 
 const id = () => new Types.ObjectId();
 
+function textStyle(overrides: Record<string, unknown> = {}) {
+  return {
+    content: 'Title',
+    x: 0.5,
+    y: 0.8,
+    width: 0.8,
+    alignment: 'center',
+    fontFamily: 'sans',
+    fontSize: 48,
+    fontColor: '#ffffff',
+    backgroundColor: '#000000',
+    backgroundOpacity: 0.4,
+    textOpacity: 1,
+    bold: false,
+    italic: false,
+    shadow: false,
+    outline: false,
+    outlineColor: '#000000',
+    outlineWidth: 2,
+    zIndex: 0,
+    ...overrides,
+  } as unknown as import('../models/EditComposition').ICompositionText;
+}
+
+function textClip(overrides: (Omit<Partial<ICompositionClip>, 'text'> & { text?: Record<string, unknown> }) = {}): ICompositionClip {
+  const { text, ...clipOverrides } = overrides;
+  return {
+    _id: id(),
+    trackId: 'text-1',
+    trackType: 'text',
+    timelineStartSeconds: 0,
+    sourceInSeconds: 0,
+    sourceOutSeconds: 0,
+    durationSeconds: 1,
+    order: 0,
+    text: textStyle(text),
+    ...clipOverrides,
+  } as ICompositionClip;
+}
+
 async function fixture(withAudio = false) {
   const projectId = id();
   const workspaceId = id();
@@ -128,7 +168,7 @@ describe('composition renderer', () => {
     }
   });
 
-  it('rejects unknown duration, missing assets, text clips, overlaps, invalid ranges, and mismatched metadata', async () => {
+  it('rejects unknown duration, missing assets, invalid text styles, overlaps, invalid ranges, and mismatched metadata', async () => {
     const fixtureData = await fixture(true);
     const workDir = path.join(config.dataDir, `renderer-test-${id()}`);
     const run = () =>
@@ -148,17 +188,15 @@ describe('composition renderer', () => {
     await expect(run()).rejects.toThrow('source asset');
 
     clip.assetId = fixtureData.assets[0]._id;
-    fixtureData.composition.clips.push({
-      _id: id(),
-      assetId: fixtureData.assets[0]._id,
-      trackId: 'text-1',
-      trackType: 'text',
-      timelineStartSeconds: 0,
-      sourceInSeconds: 0,
-      sourceOutSeconds: 1,
-      durationSeconds: 1,
-    });
-    await expect(run()).rejects.toThrow('not renderable yet');
+    const badText = textClip({ text: { content: '   ' } });
+    fixtureData.composition.clips.push(badText);
+    await expect(run()).rejects.toThrow('no content');
+    badText.text = textStyle({ fontColor: 'red' });
+    await expect(run()).rejects.toThrow('invalid colour');
+    badText.text = textStyle({ fontFamily: '../../etc/passwd' });
+    await expect(run()).rejects.toThrow('approved font registry');
+    badText.text = textStyle({ fontSize: 400 });
+    await expect(run()).rejects.toThrow('invalid font size');
     fixtureData.composition.clips.pop();
 
     fixtureData.composition.clips.push({
@@ -240,8 +278,90 @@ describe('composition renderer', () => {
     expect(graph).toContain("enable='between(t,2.000,4.000)'");
     expect(graph).toContain('adelay=delays=1000:all=1');
     expect(graph).toContain('amix=inputs=2:normalize=0');
+    // Delayed clips must not be trimmed back to [0, duration] after adelay, or
+    // every sample after the offset is dropped and the clip renders silent.
+    expect(graph).not.toMatch(/adelay=delays=\d+:all=1,apad=whole_dur=[\d.]+,atrim/);
     expect(captured).toContain('-t');
     await fs.rm(workDir, { recursive: true, force: true });
+    await cleanup(fixtureData.files);
+  });
+
+  it('renders multiple text overlays with interval filters and keeps content out of the filter string', async () => {
+    const fixtureData = await fixture(true);
+    const fontPath = path.join(config.dataDir, `test-font-${id()}.ttf`);
+    await fs.mkdir(config.dataDir, { recursive: true });
+    await fs.writeFile(fontPath, 'test-font');
+    fixtureData.composition.clips.push(
+      textClip({
+        text: { content: `He said "hello": 100% [safe] & done`, zIndex: 1 },
+        timelineStartSeconds: 0,
+        durationSeconds: 1,
+      }),
+      textClip({
+        text: {
+          content: 'Second title',
+          alignment: 'left',
+          fontFamily: 'serif',
+          bold: true,
+          italic: true,
+          shadow: true,
+          outline: true,
+          zIndex: 2,
+        },
+        timelineStartSeconds: 2,
+        durationSeconds: 2,
+      })
+    );
+    let captured: string[] = [];
+    let stagedText = '';
+    const workDir = path.join(config.dataDir, `renderer-test-${id()}`);
+    const result = await renderComposition({
+      composition: fixtureData.composition,
+      assets: fixtureData.assets,
+      workDir,
+      fontResolver: () => fontPath,
+      runner: async (command, args) => {
+        if (command === config.video.ffmpegPath) {
+          captured = args;
+          stagedText = await fs.readFile(path.join(workDir, 'overlay-text-0.txt'), 'utf8');
+          await fs.writeFile(args[args.length - 1], 'rendered');
+          return { stdout: '', stderr: '' };
+        }
+        return { stdout: probePayload({ audio: true }), stderr: '' };
+      },
+    });
+    const graph = captured[captured.indexOf('-filter_complex') + 1];
+    expect(result.durationSeconds).toBe(4);
+    expect(graph).toContain('drawtext=');
+    expect(graph).toContain('expansion=none');
+    expect(graph).toContain('text_align=center');
+    expect(graph).toContain("enable='between(t,0.000,1.000)'");
+    expect(graph).toContain("enable='between(t,2.000,4.000)'");
+    expect(graph).toContain('fontfile=overlay-font-0.ttf');
+    expect(graph).toContain('shadowcolor=#000000');
+    expect(graph).toContain('borderw=2');
+    expect(graph).not.toContain('He said');
+    expect(stagedText).toContain('He said');
+    await expect(fs.access(path.join(workDir, 'overlay-text-0.txt'))).rejects.toThrow();
+    await expect(fs.access(path.join(workDir, 'overlay-font-0.ttf'))).rejects.toThrow();
+    await fs.rm(workDir, { recursive: true, force: true });
+    await fs.rm(fontPath, { force: true });
+    await cleanup(fixtureData.files);
+  });
+
+  it('fails clearly when no approved font is available', async () => {
+    const fixtureData = await fixture();
+    fixtureData.composition.clips.push(textClip({ text: { content: 'Title' } }));
+    const workDir = path.join(config.dataDir, `renderer-test-${id()}`);
+    await expect(
+      renderComposition({
+        composition: fixtureData.composition,
+        assets: fixtureData.assets,
+        workDir,
+        fontResolver: () => null,
+        runner: fakeRunner(false),
+      })
+    ).rejects.toThrow('No approved local font');
     await cleanup(fixtureData.files);
   });
 
@@ -403,6 +523,202 @@ describe('composition renderer', () => {
 
     await expect(fs.access(path.join(workDir, `0-${fixtureData.files[0]}`))).rejects.toThrow();
     await expect(fs.access(path.join(workDir, 'render.mp4'))).rejects.toThrow();
+    await cleanup(fixtureData.files);
+  });
+
+  it('builds alpha, wipe and slide transition graphs that keep the timeline intact', async () => {
+    const cases: Array<{ type: string; needles: string[] }> = [
+      {
+        type: 'crossfade',
+        needles: ["fade=t=in:st=4.000:d=1.000:alpha=1", "enable='between(t,0.000,5.000)'"],
+      },
+      {
+        type: 'fade-black',
+        needles: ["fade=t=out:st=3.500:d=0.500:alpha=1", "fade=t=in:st=4.000:d=0.500:alpha=1"],
+      },
+      {
+        type: 'fade-white',
+        needles: ['color=c=white', "fade=t=out:st=4.000:d=0.500:alpha=1"],
+      },
+      { type: 'wipe-left', needles: ['geq=', 'blend=all_expr=', 'alphamerge'] },
+      { type: 'wipe-right', needles: ['255*(1-X/1279)', 'alphamerge'] },
+      { type: 'slide-left', needles: ["overlay=0:0:x='if(lt(t,4.000),W"] },
+      { type: 'slide-right', needles: ["overlay=0:0:x='if(lt(t,4.000),-W"] },
+    ];
+    for (const testCase of cases) {
+      const fixtureData = await fixture();
+      const videoId = fixtureData.assets[0]._id;
+      fixtureData.composition.clips.push({
+        _id: id(),
+        assetId: videoId,
+        trackId: 'video-1',
+        trackType: 'video',
+        timelineStartSeconds: 4,
+        sourceInSeconds: 0,
+        sourceOutSeconds: 4,
+        durationSeconds: 4,
+        transitionIn: { type: testCase.type as never, durationSeconds: 1 },
+      });
+      let captured: string[] = [];
+      const workDir = path.join(config.dataDir, `renderer-test-${id()}`);
+      const result = await renderComposition({
+        composition: fixtureData.composition,
+        assets: fixtureData.assets,
+        workDir,
+        runner: async (command, args) => {
+          if (command === config.video.ffmpegPath) {
+            captured = args;
+            await fs.writeFile(args[args.length - 1], 'rendered');
+            return { stdout: '', stderr: '' };
+          }
+          return { stdout: probePayload(), stderr: '' };
+        },
+      });
+      const graph = captured[captured.indexOf('-filter_complex') + 1];
+      expect(result.hasAudio).toBe(false);
+      expect(captured[captured.indexOf('-t') + 1]).toBe('8.000');
+      for (const needle of testCase.needles) {
+        expect(graph, `${testCase.type} graph should contain ${needle}`).toContain(needle);
+      }
+      await fs.rm(workDir, { recursive: true, force: true });
+      await cleanup(fixtureData.files);
+    }
+  });
+
+  it('rejects transitions that do not sit between touching clips', async () => {
+    const fixtureData = await fixture();
+    const videoId = fixtureData.assets[0]._id;
+    fixtureData.composition.clips.push({
+      _id: id(),
+      assetId: videoId,
+      trackId: 'video-1',
+      trackType: 'video',
+      timelineStartSeconds: 5,
+      sourceInSeconds: 0,
+      sourceOutSeconds: 2,
+      durationSeconds: 2,
+      transitionIn: { type: 'crossfade', durationSeconds: 1 },
+    });
+    const workDir = path.join(config.dataDir, `renderer-test-${id()}`);
+    await expect(
+      renderComposition({ composition: fixtureData.composition, assets: fixtureData.assets, workDir, runner: fakeRunner(false) })
+    ).rejects.toThrow('needs two clips that touch');
+    await cleanup(fixtureData.files);
+  });
+
+  it('adds volume and audio fades to the mix and rejects oversized fades', async () => {
+    const fixtureData = await fixture(true);
+    const audioClip = fixtureData.composition.clips.find((clip) => clip.trackType === 'audio')!;
+    audioClip.audio = { volume: 0.5, fadeInSeconds: 0.5, fadeOutSeconds: 0.5 };
+    fixtureData.composition.tracks = [
+      { trackId: 'video-1', name: 'Video', type: 'video', order: 0, muted: false, hidden: false, locked: false },
+      { trackId: 'audio-1', name: 'Audio', type: 'audio', order: 1, muted: false, hidden: false, locked: false, volume: 0.8 },
+    ];
+    let captured: string[] = [];
+    const workDir = path.join(config.dataDir, `renderer-test-${id()}`);
+    const result = await renderComposition({
+      composition: fixtureData.composition,
+      assets: fixtureData.assets,
+      workDir,
+      runner: async (command, args) => {
+        if (command === config.video.ffmpegPath) {
+          captured = args;
+          await fs.writeFile(args[args.length - 1], 'rendered');
+          return { stdout: '', stderr: '' };
+        }
+        return { stdout: probePayload({ audio: true }), stderr: '' };
+      },
+    });
+    const graph = captured[captured.indexOf('-filter_complex') + 1];
+    expect(result.hasAudio).toBe(true);
+    expect(graph).toContain('volume=0.400');
+    expect(graph).toContain('afade=t=in:st=0:d=0.500');
+    expect(graph).toContain('afade=t=out:st=3.500:d=0.500');
+    await fs.rm(workDir, { recursive: true, force: true });
+
+    audioClip.audio = { volume: 1, fadeInSeconds: 3, fadeOutSeconds: 3 };
+    await expect(
+      renderComposition({ composition: fixtureData.composition, assets: fixtureData.assets, workDir, runner: fakeRunner(true) })
+    ).rejects.toThrow('fades do not fit');
+    await cleanup(fixtureData.files);
+  });
+
+  it('renders faded and sliding text with expressions and zooms through a text layer', async () => {
+    const fixtureData = await fixture(true);
+    const fontPath = path.join(config.dataDir, `test-font-${id()}.ttf`);
+    await fs.writeFile(fontPath, 'test-font');
+    fixtureData.composition.clips.push(
+      textClip({
+        text: {
+          content: 'Fade',
+          animation: {
+            version: 1,
+            entrance: { type: 'fade', durationSeconds: 0.4, delaySeconds: 0, easing: 'ease-out' },
+          },
+        },
+        durationSeconds: 1,
+      }),
+      textClip({
+        text: {
+          content: 'Slide',
+          animation: {
+            version: 1,
+            exit: { type: 'slide-left', durationSeconds: 0.4, delaySeconds: 0, easing: 'linear' },
+          },
+        },
+        timelineStartSeconds: 1,
+        durationSeconds: 1,
+      }),
+      textClip({
+        text: {
+          content: 'Zoom',
+          animation: {
+            version: 1,
+            exit: { type: 'zoom', durationSeconds: 0.5, delaySeconds: 0, easing: 'ease-in' },
+          },
+        },
+        timelineStartSeconds: 2,
+        durationSeconds: 1,
+      })
+    );
+    let captured: string[] = [];
+    const workDir = path.join(config.dataDir, `renderer-test-${id()}`);
+    await renderComposition({
+      composition: fixtureData.composition,
+      assets: fixtureData.assets,
+      workDir,
+      fontResolver: () => fontPath,
+      runner: async (command, args) => {
+        if (command === config.video.ffmpegPath) {
+          captured = args;
+          await fs.writeFile(args[args.length - 1], 'rendered');
+          return { stdout: '', stderr: '' };
+        }
+        return { stdout: probePayload({ audio: true }), stderr: '' };
+      },
+    });
+    const graph = captured[captured.indexOf('-filter_complex') + 1];
+    expect(graph).toContain("alpha='(");
+    expect(graph).toContain("x='(w*0.5000-text_w/2)+(");
+    expect(graph).toContain('zoompan=z=');
+    expect(graph).toContain('s=2560x1440');
+    expect(graph).toContain('fps=30');
+    await fs.rm(workDir, { recursive: true, force: true });
+    await fs.rm(fontPath, { force: true });
+
+    fixtureData.composition.clips[fixtureData.composition.clips.length - 1].text!.animation = {
+      version: 1,
+      entrance: { type: 'fade', durationSeconds: 5, delaySeconds: 0, easing: 'linear' },
+    };
+    await expect(
+      renderComposition({
+        composition: fixtureData.composition,
+        assets: fixtureData.assets,
+        workDir,
+        fontResolver: () => fontPath,
+        runner: fakeRunner(false),
+      })
+    ).rejects.toThrow('does not fit inside the clip duration');
     await cleanup(fixtureData.files);
   });
 });

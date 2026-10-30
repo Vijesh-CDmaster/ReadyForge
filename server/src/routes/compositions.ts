@@ -4,24 +4,95 @@ import { z } from 'zod';
 import { Asset } from '../models/Asset';
 import {
   EditComposition,
+  ANIMATION_EASINGS,
   COMPOSITION_TRACK_TYPES,
   ICompositionClip,
+  ICompositionText,
   ICompositionTrack,
+  TEXT_ALIGNMENTS,
+  TEXT_ENTRANCE_ANIMATIONS,
+  TEXT_EXIT_ANIMATIONS,
+  TRANSITION_TYPES,
   resolveCompositionTracks,
 } from '../models/EditComposition';
 import { asyncHandler, ApiError, validateBody } from '../http';
 import { AuthedRequest, requireAuth, requireProject, requireRole } from '../middleware/auth';
 import { serializeVideoJob, submitRenderJob } from '../services/videoJobs';
 import { getVideoRenderingTools } from '../services/ffmpegTools';
+import { APPROVED_FONT_FAMILIES, stripControlCharacters } from '../services/textOverlay';
+import { parseSrt, SrtParseError } from '../services/srt';
+
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+const hexColor = z.string().regex(HEX_COLOR, 'must be a #RRGGBB colour');
+
+const textSchema = z.object({
+  content: z
+    .string()
+    .transform((value) => stripControlCharacters(value.replace(/\r\n?/g, '\n')))
+    .pipe(z.string().trim().min(1, 'Text content is required').max(1000)),
+  x: z.number().finite().min(0).max(1),
+  y: z.number().finite().min(0).max(1),
+  width: z.number().finite().min(0.05).max(1),
+  alignment: z.enum(TEXT_ALIGNMENTS),
+  fontFamily: z.enum(APPROVED_FONT_FAMILIES),
+  fontSize: z.number().finite().min(8).max(200),
+  fontColor: hexColor,
+  backgroundColor: hexColor,
+  backgroundOpacity: z.number().finite().min(0).max(1),
+  textOpacity: z.number().finite().min(0).max(1),
+  bold: z.boolean().default(false),
+  italic: z.boolean().default(false),
+  shadow: z.boolean().default(false),
+  outline: z.boolean().default(false),
+  outlineColor: hexColor.default('#000000'),
+  outlineWidth: z.number().finite().min(0).max(10).default(2),
+  zIndex: z.number().int().min(0).max(1000).default(0),
+  animation: z
+    .object({
+      version: z.literal(1),
+      entrance: z
+        .object({
+          type: z.enum(TEXT_ENTRANCE_ANIMATIONS),
+          durationSeconds: z.number().finite().min(0.05).max(10),
+          delaySeconds: z.number().finite().min(0).max(10).default(0),
+          easing: z.enum(ANIMATION_EASINGS).default('ease-out'),
+        })
+        .nullish(),
+      exit: z
+        .object({
+          type: z.enum(TEXT_EXIT_ANIMATIONS),
+          durationSeconds: z.number().finite().min(0.05).max(10),
+          delaySeconds: z.number().finite().min(0).max(10).default(0),
+          easing: z.enum(ANIMATION_EASINGS).default('ease-out'),
+        })
+        .nullish(),
+    })
+    .nullish(),
+});
+
+const transitionSchema = z.object({
+  type: z.enum(TRANSITION_TYPES),
+  durationSeconds: z.number().finite().min(0.1).max(5),
+});
+
+const clipAudioSchema = z.object({
+  volume: z.number().finite().min(0).max(2).default(1),
+  fadeInSeconds: z.number().finite().min(0).max(30).default(0),
+  fadeOutSeconds: z.number().finite().min(0).max(30).default(0),
+});
 
 const clipSchema = z.object({
-  assetId: z.string().refine(isValidObjectId, 'must be a valid asset id'),
+  assetId: z.string().refine(isValidObjectId, 'must be a valid asset id').optional(),
   trackId: z.string().trim().min(1).max(80),
   trackType: z.enum(COMPOSITION_TRACK_TYPES),
   timelineStartSeconds: z.number().finite().min(0),
-  sourceInSeconds: z.number().finite().min(0),
-  sourceOutSeconds: z.number().finite().min(0),
+  sourceInSeconds: z.number().finite().min(0).default(0),
+  sourceOutSeconds: z.number().finite().min(0).default(0),
+  durationSeconds: z.number().finite().min(0.1).max(3600).optional(),
   order: z.number().int().min(0).optional(),
+  text: textSchema.optional(),
+  transitionIn: transitionSchema.optional(),
+  audio: clipAudioSchema.optional(),
 });
 
 const trackSchema = z.object({
@@ -32,6 +103,7 @@ const trackSchema = z.object({
   muted: z.boolean().default(false),
   hidden: z.boolean().default(false),
   locked: z.boolean().default(false),
+  volume: z.number().finite().min(0).max(2).default(1),
 });
 
 const saveSchema = z
@@ -59,13 +131,58 @@ function serializeTrack(track: ICompositionTrack) {
     muted: Boolean(track.muted),
     hidden: Boolean(track.hidden),
     locked: Boolean(track.locked),
+    volume: track.volume ?? 1,
+  };
+}
+
+function serializeText(text: ICompositionText) {
+  return {
+    content: text.content,
+    x: text.x,
+    y: text.y,
+    width: text.width,
+    alignment: text.alignment,
+    fontFamily: text.fontFamily,
+    fontSize: text.fontSize,
+    fontColor: text.fontColor,
+    backgroundColor: text.backgroundColor,
+    backgroundOpacity: text.backgroundOpacity,
+    textOpacity: text.textOpacity,
+    bold: Boolean(text.bold),
+    italic: Boolean(text.italic),
+    shadow: Boolean(text.shadow),
+    outline: Boolean(text.outline),
+    outlineColor: text.outlineColor,
+    outlineWidth: text.outlineWidth,
+    zIndex: text.zIndex,
+    animation: text.animation
+      ? {
+          version: 1 as const,
+          entrance: text.animation.entrance
+            ? {
+                type: text.animation.entrance.type,
+                durationSeconds: text.animation.entrance.durationSeconds,
+                delaySeconds: text.animation.entrance.delaySeconds ?? 0,
+                easing: text.animation.entrance.easing,
+              }
+            : null,
+          exit: text.animation.exit
+            ? {
+                type: text.animation.exit.type,
+                durationSeconds: text.animation.exit.durationSeconds,
+                delaySeconds: text.animation.exit.delaySeconds ?? 0,
+                easing: text.animation.exit.easing,
+              }
+            : null,
+        }
+      : null,
   };
 }
 
 function serializeClip(clip: ICompositionClip & { _id?: Types.ObjectId }) {
   return {
     id: clip._id?.toString(),
-    assetId: clip.assetId.toString(),
+    assetId: clip.assetId ? clip.assetId.toString() : null,
     trackId: clip.trackId,
     trackType: clip.trackType,
     timelineStartSeconds: clip.timelineStartSeconds,
@@ -73,6 +190,17 @@ function serializeClip(clip: ICompositionClip & { _id?: Types.ObjectId }) {
     sourceOutSeconds: clip.sourceOutSeconds,
     durationSeconds: clip.durationSeconds ?? null,
     order: clip.order ?? 0,
+    text: clip.text ? serializeText(clip.text) : null,
+    transitionIn: clip.transitionIn
+      ? { type: clip.transitionIn.type, durationSeconds: clip.transitionIn.durationSeconds }
+      : null,
+    audio: clip.audio
+      ? {
+          volume: clip.audio.volume ?? 1,
+          fadeInSeconds: clip.audio.fadeInSeconds ?? 0,
+          fadeOutSeconds: clip.audio.fadeOutSeconds ?? 0,
+        }
+      : null,
   };
 }
 
@@ -98,14 +226,17 @@ function serialize(composition: {
 
 function clipsEqual(a: ICompositionClip, b: ICompositionClip): boolean {
   return (
-    a.assetId.toString() === b.assetId.toString() &&
+    (a.assetId?.toString() ?? '') === (b.assetId?.toString() ?? '') &&
     a.trackId === b.trackId &&
     a.trackType === b.trackType &&
     Math.abs(a.timelineStartSeconds - b.timelineStartSeconds) < 0.001 &&
     Math.abs(a.sourceInSeconds - b.sourceInSeconds) < 0.001 &&
     Math.abs(a.sourceOutSeconds - b.sourceOutSeconds) < 0.001 &&
     Math.abs((a.durationSeconds ?? 0) - (b.durationSeconds ?? 0)) < 0.001 &&
-    (a.order ?? 0) === (b.order ?? 0)
+    (a.order ?? 0) === (b.order ?? 0) &&
+    JSON.stringify(a.text ? serializeText(a.text) : null) === JSON.stringify(b.text ? serializeText(b.text) : null) &&
+    JSON.stringify(a.transitionIn ?? null) === JSON.stringify(b.transitionIn ?? null) &&
+    JSON.stringify(a.audio ?? null) === JSON.stringify(b.audio ?? null)
   );
 }
 
@@ -171,12 +302,48 @@ compositionsRouter.put(
       if (track.type !== clip.trackType) {
         throw new ApiError(400, `Clip type does not match track "${track.name}".`);
       }
+      if (clip.transitionIn && track.type !== 'video') {
+        throw new ApiError(400, 'Transitions are only supported between video clips.');
+      }
+      if (clip.audio && track.type !== 'audio') {
+        throw new ApiError(400, 'Clip volume and fades are only supported on audio clips.');
+      }
+      if (track.type !== 'audio' && track.volume !== undefined && track.volume !== 1) {
+        throw new ApiError(400, `Track "${track.name}" is not an audio track; it has no volume.`);
+      }
       if (track.type === 'text') {
-        throw new ApiError(400, 'Text and overlay clips are not supported by this renderer yet.');
+        if (clip.assetId) throw new ApiError(400, 'Text clips cannot reference media assets.');
+        if (!clip.text) throw new ApiError(400, 'Every text clip must include its text properties.');
+        if (clip.durationSeconds === undefined) {
+          throw new ApiError(400, 'Every text clip must include a positive timeline duration.');
+        }
+        for (const [slot, settings] of [
+          ['entrance', clip.text.animation?.entrance],
+          ['exit', clip.text.animation?.exit],
+        ] as const) {
+          if (!settings) continue;
+          const span = settings.durationSeconds + (settings.delaySeconds ?? 0);
+          if (span > clip.durationSeconds + 0.001) {
+            throw new ApiError(
+              400,
+              `The ${slot} animation (delay + duration ${span.toFixed(2)}s) does not fit inside a ${clip.durationSeconds.toFixed(2)}s text clip.`
+            );
+          }
+        }
+      } else {
+        if (!clip.assetId) throw new ApiError(400, 'Media clips must reference an asset.');
+        if (clip.text) throw new ApiError(400, 'Only clips on text tracks may include text properties.');
       }
     }
 
-    const assetIds = [...new Set(body.clips.map((clip) => clip.assetId))];
+    const assetIds = [
+      ...new Set(
+        body.clips
+          .filter((clip) => clip.trackType !== 'text')
+          .map((clip) => clip.assetId)
+          .filter((value): value is string => Boolean(value))
+      ),
+    ];
     const assets = await Asset.find({
       _id: { $in: assetIds },
       projectId: req.project!._id,
@@ -189,7 +356,19 @@ compositionsRouter.put(
 
     const byId = new Map(assets.map((asset) => [asset._id.toString(), asset]));
     const clips: ICompositionClip[] = body.clips.map((clip, index) => {
-      const asset = byId.get(clip.assetId);
+      if (clip.trackType === 'text') {
+        return {
+          trackId: clip.trackId,
+          trackType: 'text',
+          timelineStartSeconds: clip.timelineStartSeconds,
+          sourceInSeconds: 0,
+          sourceOutSeconds: 0,
+          durationSeconds: clip.durationSeconds,
+          order: clip.order ?? index,
+          text: clip.text as ICompositionText,
+        };
+      }
+      const asset = byId.get(clip.assetId!);
       if (!asset) throw new ApiError(400, 'Referenced asset is unavailable.');
       if (clip.trackType !== asset.type) {
         throw new ApiError(400, `A ${clip.trackType} clip must reference ${clip.trackType} media.`);
@@ -212,10 +391,16 @@ compositionsRouter.put(
         throw new ApiError(400, 'Clip source range must have a positive duration.');
       }
       return {
-        ...clip,
+        trackId: clip.trackId,
+        trackType: clip.trackType,
+        timelineStartSeconds: clip.timelineStartSeconds,
+        sourceInSeconds: clip.sourceInSeconds,
+        sourceOutSeconds: clip.sourceOutSeconds,
         assetId: new Types.ObjectId(clip.assetId),
         durationSeconds: duration,
         order: clip.order ?? index,
+        transitionIn: clip.transitionIn,
+        audio: clip.audio,
       };
     });
 
@@ -224,6 +409,8 @@ compositionsRouter.put(
         const a = clips[i];
         const b = clips[j];
         if (a.trackId !== b.trackId) continue;
+        // Text overlays may overlap in time; z-index and draw order decide stacking.
+        if (trackById.get(a.trackId)?.type === 'text') continue;
         if (a.durationSeconds === undefined || b.durationSeconds === undefined) {
           throw new ApiError(400, 'Clips with unknown source duration cannot share a track.');
         }
@@ -232,6 +419,36 @@ compositionsRouter.put(
         if (a.timelineStartSeconds < bEnd && b.timelineStartSeconds < aEnd) {
           throw new ApiError(400, 'Clips on the same track cannot overlap.');
         }
+      }
+    }
+
+    for (const clip of clips) {
+      if (clip.audio) {
+        const duration = clip.durationSeconds ?? 0;
+        if (clip.audio.fadeInSeconds + clip.audio.fadeOutSeconds > duration + 0.001) {
+          throw new ApiError(400, 'Audio fades must fit inside the clip duration.');
+        }
+      }
+      if (!clip.transitionIn) continue;
+      const predecessors = clips
+        .filter((candidate) => candidate !== clip && candidate.trackId === clip.trackId)
+        .filter((candidate) => {
+          const end = candidate.timelineStartSeconds + (candidate.durationSeconds ?? 0);
+          return Math.abs(end - clip.timelineStartSeconds) <= 0.011;
+        });
+      if (predecessors.length !== 1) {
+        throw new ApiError(
+          400,
+          'A transition needs exactly one earlier clip on the same track that ends where this clip starts.'
+        );
+      }
+      const previous = predecessors[0];
+      const limit = Math.min(previous.durationSeconds ?? 0, clip.durationSeconds ?? 0);
+      if (clip.transitionIn.durationSeconds > limit + 0.001) {
+        throw new ApiError(
+          400,
+          `A ${clip.transitionIn.durationSeconds.toFixed(2)}s transition does not fit inside the ${limit.toFixed(2)}s shorter clip.`
+        );
       }
     }
 
@@ -251,7 +468,8 @@ compositionsRouter.put(
           submitted.type === locked.type &&
           submitted.order === locked.order &&
           Boolean(submitted.muted) === Boolean(locked.muted) &&
-          Boolean(submitted.hidden) === Boolean(locked.hidden);
+          Boolean(submitted.hidden) === Boolean(locked.hidden) &&
+          (submitted.volume ?? 1) === (locked.volume ?? 1);
         if (!metadataSame) {
           throw new ApiError(409, `Track "${locked.name}" is locked; unlock it before changing its settings.`);
         }
@@ -284,6 +502,23 @@ compositionsRouter.put(
     }
     await composition.save();
     return res.json({ composition: serialize(composition) });
+  })
+);
+
+const subtitleSchema = z.object({ srt: z.string().min(1).max(200_000) });
+
+compositionsRouter.post(
+  '/subtitles/parse',
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const body = validateBody(subtitleSchema, req.body);
+    try {
+      const cues = parseSrt(body.srt);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ cues, count: cues.length });
+    } catch (error) {
+      if (error instanceof SrtParseError) throw new ApiError(400, error.message);
+      throw error;
+    }
   })
 );
 

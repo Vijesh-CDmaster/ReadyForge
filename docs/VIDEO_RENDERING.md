@@ -37,20 +37,47 @@ committed or redistributed with the source tree.
 - Multiple audio tracks. Clips are trimmed, delayed to their timeline position,
   padded to the render duration, and mixed into one AAC stream. Muted audio tracks
   and hidden video tracks are excluded explicitly.
-- Empty text/overlay tracks are organizational. Text clips are rejected at save and
-  render time because text compositing is not implemented yet; they are never
-  silently ignored.
+- Text/overlay tracks. Text clips are burned into the video with FFmpeg
+  `drawtext` between their own timeline start and end, so several overlays can be
+  visible at once and later ones follow their own interval.
 - Clips with trusted positive duration metadata. Uploaded video/audio files are
   probed with FFprobe and their duration is stored on the asset, so imported media
   can be trimmed and rendered without manual metadata entry.
 - Output: MP4 container, H.264 (`libx264`) video at 1280×720 / 30 fps, AAC audio
   at 48 kHz stereo when the composition contains audio.
 - Each render runs in an isolated temporary directory under `server/.data/renders/`.
-  Staged inputs and failed outputs are deleted; successful outputs are stored as
-  protected project assets.
+  Staged media, per-clip font/text files, and failed outputs are deleted; successful
+  outputs are stored as protected project assets.
 
-Transitions, text/overlay rendering, opacity/blend controls, and GPU encoding are
-not part of this phase.
+Transitions, blend modes, and GPU encoding are not part of this phase.
+
+## Text, titles, and subtitles
+
+Text clips carry content, timeline start/end, normalized x/y/width, alignment, font
+family, size, colour, background colour and opacity, text opacity, bold, italic,
+shadow, outline, and z-index. Values are validated server-side: colours must be
+`#RRGGBB`, every number must be finite and within range, and content is capped at
+1,000 characters. Clips are drawn only between their own start and end, ordered by
+`zIndex` and then track/clip order.
+
+Fonts are never user paths. A clip picks one approved family (`sans`, `serif`,
+`mono`), which the server resolves to a known file in `tools/fonts/` or a standard
+system font directory and copies into the render's temporary directory. Text is
+written to a per-clip file and passed as `textfile=` with `expansion=none`, so user
+content is never interpolated into the filter graph or a shell command. If no
+approved font or no `drawtext` filter is available, the render fails with a clear
+message instead of silently dropping text; `drawtext` needs an FFmpeg build with
+libfreetype (the bundled GPL build has it).
+
+`POST /api/subtitles/parse` accepts raw SRT text (≤200,000 characters, ≤1,000
+cues), validates every timing line, strips markup and control characters, and
+returns cues. The editor converts them into timed text clips, which are then burned
+in by the same renderer.
+
+The editor preview renders the same text clips as absolutely positioned HTML over
+the video using the same 1280×720 geometry, colours, weight, style, outline, shadow,
+and wrapping. It is a close approximation, not pixel-identical: browser text layout,
+camera scaling, and FFmpeg's own layout can differ by a few pixels per line.
 
 ## Install FFmpeg manually (Windows)
 
@@ -159,6 +186,85 @@ you install and for any redistribution of that binary.
 If you distribute ReadyForge together with an FFmpeg binary, comply with that
 binary's GPL/LGPL obligations (including source availability). If you only instruct
 users to install FFmpeg themselves, their installation is separate from ReadyForge.
+
+## Text animations
+
+Text clips may carry a versioned animation model (`animation.version: 1`) with an
+entrance and/or exit:
+
+| Slot | Types |
+| --- | --- |
+| Entrance | `fade`, `slide-left`, `slide-right`, `slide-top`, `slide-bottom`, `zoom`, `pop` |
+| Exit | `fade`, `slide-left`, `slide-right`, `slide-top`, `slide-bottom`, `zoom` |
+
+Each slot has a duration (0.05–10 s), a delay (0–10 s), and an easing curve
+(`linear`, `ease-in`, `ease-out`, `ease-in-out`). Delay plus duration must fit
+inside the clip; the save API and the renderer both enforce that.
+
+Animations are pure functions of absolute timeline time:
+
+- `fade` becomes a `drawtext` `alpha=` expression built from the clip start/end and
+the easing formula.
+- `slide-*` becomes `x`/`y` expressions whose pixel offset travels from one frame
+edge to zero (or zero to the edge on exit).
+- `zoom`/`pop` scale glyphs, which `drawtext` cannot express, so the text is drawn
+once on a transparent 2560×1440 layer and animated with `zoompan` before being
+composited. `pop` overshoots to 1.08× before settling.
+
+Because nothing accumulates per frame, seeking, pausing, and re-rendering always
+produce the same frame. A text clip with no animation keeps the exact drawtext path
+it had before, so its output is unchanged.
+
+## Video transitions
+
+A transition is declared on the **incoming** clip (`clip.transitionIn`) and applies
+between that clip and the one ending exactly where it starts on the same track.
+The editor only offers a transition when such a neighbour exists.
+
+| Type | FFmpeg implementation |
+| --- | --- |
+| `crossfade` | incoming alpha `fade` over the outgoing picture |
+| `fade-black` | outgoing alpha out, incoming alpha in, black base between |
+| `fade-white` | the same two alphas plus a white layer that peaks at the cut |
+| `wipe-left` / `wipe-right` | a static gradient compared against a white source that fades up, producing a moving wipe mask fed to `alphamerge` |
+| `slide-left` / `slide-right` | the incoming layer's overlay `x` expression travels across the frame |
+
+Timeline offsets are preserved exactly: the transition happens inside the incoming
+clip's timeline span while the outgoing clip keeps showing underneath, using its
+source handle when one exists and otherwise holding its final frame. Audio is never
+shifted, so audio/video sync is unaffected. A transition that is longer than either
+neighbour, does not sit at a shared cut, or uses an unknown type fails validation
+instead of being ignored.
+
+## Audio gain, fades, and volume
+
+Audio clips accept `volume` (0–2), `fadeInSeconds`, and `fadeOutSeconds`; the two
+fades must fit inside the clip. Audio tracks accept a linear `volume` (0–2) that
+multiplies every clip on the track. Rendering applies `volume`, `afade` in/out, then
+the existing timeline delay, padding, and `amix` with `alimiter=limit=0.95` so mixed
+tracks are less likely to clip. Muted tracks are skipped as before.
+
+A delayed clip is padded to the full timeline length but never trimmed back to
+`[0, duration]` afterwards: a trailing `atrim` after `adelay` drops every sample
+after the offset and silently mutes any clip that starts later on the timeline. A
+renderer regression test asserts that this trim stays out of the audio chain.
+
+## Preview parity
+
+The editor preview evaluates the same animation functions against the absolute
+playhead: opacity, pixel offset, and scale are derived per render, never from CSS
+timers. Transitions are previewed by stacking the outgoing clip's video under the
+incoming one with an alpha, `clip-path`, or translate effect plus a black/white
+flash overlay.
+
+Known differences from the render:
+
+- FFmpeg re-samples text with its own layout; the browser uses HTML text metrics, so
+wrapping and glyph positions can differ by a few pixels.
+- The preview composites at viewport resolution rather than 1280×720 and cannot show
+more than two clips at once.
+- Audio tracks are not played by the preview, so volume and fade values are edited
+but not auditioned in the browser.
 
 ## Operational and concurrency notes
 

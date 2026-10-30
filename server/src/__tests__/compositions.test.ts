@@ -236,11 +236,215 @@ describe('project compositions', () => {
     expect(body.composition.schemaVersion).toBe(1);
     expect(body.composition.clips).toHaveLength(1);
     expect(body.composition.tracks).toEqual([
-      { trackId: 'video-1', name: 'Video 1', type: 'video', order: 0, muted: false, hidden: false, locked: false },
+      {
+        trackId: 'video-1',
+        name: 'Video 1',
+        type: 'video',
+        order: 0,
+        muted: false,
+        hidden: false,
+        locked: false,
+        volume: 1,
+      },
     ]);
   });
 
-  it('rejects undeclared tracks, track-type mismatches, text clips, and edits to locked tracks', async () => {
+  it('validates and persists text overlay clips with safe defaults', async () => {
+    const { project, asset, token } = await fixture();
+    const path = `/api/projects/${project._id}/composition`;
+    const textTrack = { trackId: 't1', name: 'Titles', type: 'text', order: 1, hidden: false, muted: false, locked: false };
+    const videoTrack = { trackId: 'v1', name: 'Main', type: 'video', order: 0, hidden: false, muted: false, locked: false };
+    const style = {
+      content: 'Launch day',
+      x: 0.5,
+      y: 0.8,
+      width: 0.7,
+      alignment: 'center',
+      fontFamily: 'sans',
+      fontSize: 54,
+      fontColor: '#ffffff',
+      backgroundColor: '#000000',
+      backgroundOpacity: 0.45,
+      textOpacity: 1,
+      bold: true,
+      italic: false,
+      shadow: true,
+      outline: true,
+      outlineColor: '#000000',
+      outlineWidth: 2,
+      zIndex: 5,
+    };
+    const save = (text: object | null, duration = 2) =>
+      request(path, token, {
+        method: 'PUT',
+        body: JSON.stringify({
+          schemaVersion: 2,
+          tracks: [videoTrack, textTrack],
+          clips: [
+            { assetId: asset._id, trackId: 'v1', trackType: 'video', timelineStartSeconds: 0, sourceInSeconds: 0, sourceOutSeconds: 4 },
+            ...(text
+              ? [{ trackId: 't1', trackType: 'text', timelineStartSeconds: 1, durationSeconds: duration, text }]
+              : []),
+          ],
+        }),
+      });
+
+    const created = await save(style);
+    expect(created.status).toBe(200);
+    const saved = (await created.json()) as {
+      composition: { clips: Array<{ trackType: string; assetId: string | null; text: { content: string; zIndex: number } | null }> };
+    };
+    const textClip = saved.composition.clips.find((clip) => clip.trackType === 'text');
+    expect(textClip?.assetId).toBeNull();
+    expect(textClip?.text).toMatchObject({ content: 'Launch day', zIndex: 5 });
+
+    expect((await save({ ...style, fontColor: 'red' })).status).toBe(400);
+    expect((await save({ ...style, fontFamily: 'C:\\Windows\\Fonts\\arial.ttf' })).status).toBe(400);
+    expect((await save({ ...style, textOpacity: 1.5 })).status).toBe(400);
+    expect((await save({ ...style, fontSize: 4 })).status).toBe(400);
+    expect((await save({ ...style, content: '   ' })).status).toBe(400);
+    expect((await save({ ...style, width: 2 })).status).toBe(400);
+    expect((await save(style, 0)).status).toBe(400);
+  });
+
+  it('persists text animations, clip transitions, and audio gain, and rejects invalid combinations', async () => {
+    const { user, workspace, project, asset, token } = await fixture();
+    const audioAsset = await Asset.create({
+      workspaceId: workspace._id,
+      projectId: project._id,
+      uploadedById: user._id,
+      name: 'tone.wav',
+      type: 'audio',
+      fileUrl: '/uploads/tone.wav',
+      mimeType: 'audio/wav',
+      sourceDurationSeconds: 20,
+    });
+    const endpoint = `/api/projects/${project._id}/composition`;
+    const send = (body: object) => request(endpoint, token, { method: 'PUT', body: JSON.stringify(body) });
+    const tracks = [
+      { trackId: 'v1', name: 'Main', type: 'video', order: 0, hidden: false, muted: false, locked: false, volume: 1 },
+      { trackId: 't1', name: 'Titles', type: 'text', order: 1, hidden: false, muted: false, locked: false, volume: 1 },
+      { trackId: 'a1', name: 'Music', type: 'audio', order: 2, hidden: false, muted: false, locked: false, volume: 0.5 },
+    ];
+    const style = {
+      content: 'Animated',
+      x: 0.5,
+      y: 0.3,
+      width: 0.8,
+      alignment: 'center',
+      fontFamily: 'sans',
+      fontSize: 54,
+      fontColor: '#ffffff',
+      backgroundColor: '#000000',
+      backgroundOpacity: 0,
+      textOpacity: 1,
+      bold: true,
+      italic: false,
+      shadow: false,
+      outline: false,
+      outlineColor: '#000000',
+      outlineWidth: 2,
+      zIndex: 3,
+      animation: {
+        version: 1,
+        entrance: { type: 'zoom', durationSeconds: 0.6, delaySeconds: 0, easing: 'ease-out' },
+        exit: { type: 'fade', durationSeconds: 0.4, delaySeconds: 0, easing: 'linear' },
+      },
+    };
+    const videoClips = [
+      { assetId: asset._id, trackId: 'v1', trackType: 'video', timelineStartSeconds: 0, sourceInSeconds: 0, sourceOutSeconds: 2 },
+      {
+        assetId: asset._id,
+        trackId: 'v1',
+        trackType: 'video',
+        timelineStartSeconds: 2,
+        sourceInSeconds: 2,
+        sourceOutSeconds: 4,
+        transitionIn: { type: 'crossfade', durationSeconds: 0.6 },
+      },
+    ];
+    const textClip = { trackId: 't1', trackType: 'text', timelineStartSeconds: 0, durationSeconds: 2, text: style };
+    const audioClip = {
+      assetId: audioAsset._id,
+      trackId: 'a1',
+      trackType: 'audio',
+      timelineStartSeconds: 0,
+      sourceInSeconds: 0,
+      sourceOutSeconds: 2,
+      audio: { volume: 0.5, fadeInSeconds: 0.5, fadeOutSeconds: 0.5 },
+    };
+
+    const created = await send({ schemaVersion: 2, tracks, clips: [...videoClips, textClip, audioClip] });
+    expect(created.status).toBe(200);
+    const saved = (await created.json()) as {
+      composition: {
+        tracks: Array<{ trackId: string; volume: number }>;
+        clips: Array<{
+          trackType: string;
+          transitionIn: { type: string; durationSeconds: number } | null;
+          audio: { volume: number; fadeInSeconds: number } | null;
+          text: { animation: { entrance: { type: string } | null; exit: { type: string } | null } | null } | null;
+        }>;
+      };
+    };
+    expect(saved.composition.tracks.find((track) => track.trackId === 'a1')?.volume).toBe(0.5);
+    expect(saved.composition.clips.find((clip) => clip.trackType === 'video' && clip.transitionIn)?.transitionIn).toEqual({
+      type: 'crossfade',
+      durationSeconds: 0.6,
+    });
+    expect(saved.composition.clips.find((clip) => clip.trackType === 'text')?.text?.animation?.entrance).toMatchObject({
+      type: 'zoom',
+      easing: 'ease-out',
+    });
+    expect(saved.composition.clips.find((clip) => clip.trackType === 'audio')?.audio).toMatchObject({
+      volume: 0.5,
+      fadeInSeconds: 0.5,
+    });
+
+    expect((await send({ schemaVersion: 2, tracks, clips: [videoClips[0], { ...videoClips[1], timelineStartSeconds: 3 }] })).status).toBe(400);
+    expect((await send({ schemaVersion: 2, tracks, clips: [videoClips[0], { ...videoClips[1], transitionIn: { type: 'crossfade', durationSeconds: 3 } }] })).status).toBe(400);
+    expect((await send({ schemaVersion: 2, tracks, clips: [videoClips[0], { ...videoClips[1], transitionIn: { type: 'spin', durationSeconds: 0.5 } }] })).status).toBe(400);
+    expect(
+      (await send({
+        schemaVersion: 2,
+        tracks,
+        clips: [
+          videoClips[0],
+          { ...textClip, text: { ...style, animation: { version: 1, entrance: { type: 'fade', durationSeconds: 5, delaySeconds: 0, easing: 'linear' } } } },
+        ],
+      })).status
+    ).toBe(400);
+    expect(
+      (await send({
+        schemaVersion: 2,
+        tracks,
+        clips: [videoClips[0], { ...audioClip, audio: { volume: 1, fadeInSeconds: 1.5, fadeOutSeconds: 1.5 } }],
+      })).status
+    ).toBe(400);
+    expect((await send({ schemaVersion: 2, tracks, clips: [videoClips[0], { ...videoClips[1], audio: { volume: 1, fadeInSeconds: 0, fadeOutSeconds: 0 } }] })).status).toBe(400);
+    expect((await send({ schemaVersion: 2, tracks: [{ ...tracks[0], volume: 0.5 }], clips: [videoClips[0]] })).status).toBe(400);
+    expect((await send({ schemaVersion: 2, tracks, clips: [{ ...audioClip, transitionIn: { type: 'crossfade', durationSeconds: 0.5 } }] })).status).toBe(400);
+  });
+
+  it('parses SRT subtitles through the authenticated endpoint', async () => {
+    const { token } = await fixture();
+    const result = await request('/api/subtitles/parse', token, {
+      method: 'POST',
+      body: JSON.stringify({ srt: '1\n00:00:01,000 --> 00:00:02,500\nFirst line\n\n2\n00:00:03,000 --> 00:00:04,000\nSecond' }),
+    });
+    expect(result.status).toBe(200);
+    const body = (await result.json()) as { cues: Array<{ startSeconds: number; endSeconds: number; text: string }>; count: number };
+    expect(body.count).toBe(2);
+    expect(body.cues[1]).toEqual({ index: 2, startSeconds: 3, endSeconds: 4, text: 'Second' });
+
+    const invalid = await request('/api/subtitles/parse', token, {
+      method: 'POST',
+      body: JSON.stringify({ srt: 'not a subtitle' }),
+    });
+    expect(invalid.status).toBe(400);
+  });
+
+  it('rejects undeclared tracks, track-type mismatches, text clips with assets, and edits to locked tracks', async () => {
     const { project, asset, token } = await fixture();
     const path = `/api/projects/${project._id}/composition`;
     const baseTrack = { trackId: 'v1', name: 'Main', type: 'video', order: 0, hidden: false, muted: false, locked: false };

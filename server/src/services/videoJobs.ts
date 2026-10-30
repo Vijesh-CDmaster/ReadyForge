@@ -688,13 +688,20 @@ async function processRenderJob(
   if (!authorization.authorized) {
     throw new VideoProviderError(authorizationMessage(authorization), 'validation', false);
   }
+  const sourceAssetIds = [
+    ...new Set(
+      composition.clips
+        .map((clip) => clip.assetId?.toString())
+        .filter((value): value is string => Boolean(value))
+    ),
+  ];
   const assets = await Asset.find({
-    _id: { $in: composition.clips.map((clip) => clip.assetId) },
+    _id: { $in: sourceAssetIds },
     projectId: project._id,
     workspaceId: task.workspaceId,
     type: { $in: ['video', 'audio'] },
   });
-  if (assets.length !== new Set(composition.clips.map((clip) => clip.assetId.toString())).size) {
+  if (assets.length !== sourceAssetIds.length) {
     throw new VideoProviderError('A composition source asset is unavailable.', 'validation', false);
   }
   if (!(await heartbeat(task._id, leaseId, 5, 'preparing render'))) {
