@@ -3,11 +3,9 @@ import { Request, Response } from 'express';
 import { z, ZodTypeAny } from 'zod';
 import { config } from './config';
 
-declare global {
-  namespace Express {
-    interface Request {
-      requestId?: string;
-    }
+declare module 'express-serve-static-core' {
+  interface Request {
+    requestId?: string;
   }
 }
 

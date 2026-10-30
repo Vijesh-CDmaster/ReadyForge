@@ -76,8 +76,8 @@ generationRouter.get(
     const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
     const skip = Math.max(Number(req.query.skip) || 0, 0);
     const [jobs, total] = await Promise.all([
-      GenerationTask.find({ projectId: req.project!._id, providerId: { $in: ['mock', 'runway'] } }).sort('-createdAt').skip(skip).limit(limit),
-      GenerationTask.countDocuments({ projectId: req.project!._id, providerId: { $in: ['mock', 'runway'] } }),
+      GenerationTask.find({ projectId: req.project!._id, providerId: { $in: ['mock', 'runway', 'ffmpeg'] } }).sort('-createdAt').skip(skip).limit(limit),
+      GenerationTask.countDocuments({ projectId: req.project!._id, providerId: { $in: ['mock', 'runway', 'ffmpeg'] } }),
     ]);
     res.json({ jobs: jobs.map(serializeVideoJob), total, limit, skip });
   })
@@ -86,7 +86,7 @@ generationRouter.get(
 generationRouter.post(
   '/video-jobs/:id/retry',
   asyncHandler(async (req: AuthedRequest, res) => {
-    const task = await GenerationTask.findOne({ _id: req.params.id, providerId: { $in: ['mock', 'runway'] } });
+    const task = await GenerationTask.findOne({ _id: req.params.id, providerId: { $in: ['mock', 'runway', 'ffmpeg'] } });
     if (!task) throw new ApiError(404, 'Video job not found');
     await getAuthorizedProject(req.user!, task.projectId);
     if (task.status !== 'failed') throw new ApiError(409, 'Only failed video jobs can be retried.');
@@ -106,14 +106,14 @@ generationRouter.post(
 generationRouter.post(
   '/video-jobs/:id/cancel',
   asyncHandler(async (req: AuthedRequest, res) => {
-    const existing = await GenerationTask.findOne({ _id: req.params.id, providerId: { $in: ['mock', 'runway'] } });
+    const existing = await GenerationTask.findOne({ _id: req.params.id, providerId: { $in: ['mock', 'runway', 'ffmpeg'] } });
     if (!existing) throw new ApiError(404, 'Video job not found');
     await getAuthorizedProject(req.user!, existing.projectId);
     if (existing.status === 'running') {
       throw new ApiError(409, 'Running provider jobs cannot be cancelled safely; cancellation is advisory only.');
     }
     const task = await GenerationTask.findOneAndUpdate(
-      { _id: existing._id, providerId: { $in: ['mock', 'runway'] }, status: 'queued' },
+      { _id: existing._id, providerId: { $in: ['mock', 'runway', 'ffmpeg'] }, status: 'queued' },
       { $set: { status: 'cancelled', completedAt: new Date(), currentStage: 'cancelled' } },
       { new: true }
     );

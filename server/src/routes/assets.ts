@@ -11,6 +11,7 @@ import { requireAuth, requireProject, AuthedRequest } from '../middleware/auth';
 import { asyncHandler, validateBody, ApiError } from '../http';
 import { audit, clientIp } from '../audit';
 import { config } from '../config';
+import { probeMediaFile } from '../services/ffmpegTools';
 
 export const assetsRouter = Router();
 assetsRouter.use(requireAuth);
@@ -157,6 +158,8 @@ assetsRouter.post(
     }
 
     const type = (ALLOWED[file.mimetype] || 'other') as IAsset['type'];
+    const mediaProbe =
+      type === 'video' || type === 'audio' ? await probeMediaFile(file.path) : null;
     const asset = await Asset.create({
       workspaceId,
       projectId: project?._id,
@@ -167,6 +170,7 @@ assetsRouter.post(
       thumbnailUrl: type === 'image' || type === 'logo' ? `/uploads/${file.filename}` : '',
       mimeType: file.mimetype,
       sizeBytes: file.size,
+      sourceDurationSeconds: mediaProbe?.durationSeconds,
       licenseStatus: LICENSE_STATUSES.includes(req.body.licenseStatus) ? req.body.licenseStatus : 'unknown',
     });
 

@@ -8,6 +8,48 @@ import { VideoProviderError } from './videoProvider';
 
 const MAX_OUTPUT_BYTES = 250 * 1024 * 1024;
 
+export async function storeRenderedVideoOutput(params: {
+  sourcePath: string;
+  taskId: Types.ObjectId;
+  projectId: Types.ObjectId;
+  workspaceId: Types.ObjectId;
+  uploadedById: Types.ObjectId;
+  durationSeconds: number;
+  width: number;
+  height: number;
+}): Promise<Types.ObjectId> {
+  if (!Number.isFinite(params.durationSeconds) || params.durationSeconds <= 0 || params.width < 1 || params.height < 1) {
+    throw new VideoProviderError('Rendered output metadata is invalid.', 'validation', false);
+  }
+  const stat = await fs.stat(params.sourcePath);
+  if (!stat.isFile() || stat.size === 0 || stat.size > MAX_OUTPUT_BYTES) {
+    throw new VideoProviderError('Rendered output is empty or exceeds the size limit.', 'validation', false);
+  }
+  const fileName = `rendered-${params.taskId.toString()}-${crypto.randomUUID()}.mp4`;
+  const filePath = path.resolve(config.upload.dir, fileName);
+  await fs.mkdir(config.upload.dir, { recursive: true });
+  try {
+    await fs.copyFile(params.sourcePath, filePath, fs.constants.COPYFILE_EXCL);
+    const asset = await Asset.create({
+      workspaceId: params.workspaceId,
+      projectId: params.projectId,
+      uploadedById: params.uploadedById,
+      name: fileName,
+      type: 'video',
+      fileUrl: `/uploads/${fileName}`,
+      mimeType: 'video/mp4',
+      sizeBytes: stat.size,
+      sourceDurationSeconds: params.durationSeconds,
+      licenseStatus: 'owned',
+      aiGenerated: true,
+    });
+    return asset._id;
+  } catch (error) {
+    await fs.rm(filePath, { force: true });
+    throw error;
+  }
+}
+
 async function readBounded(response: Response): Promise<Buffer> {
   const declaredLength = Number(response.headers.get('content-length') || 0);
   if (declaredLength > MAX_OUTPUT_BYTES) {

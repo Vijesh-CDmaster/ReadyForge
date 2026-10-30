@@ -15,3 +15,6 @@ server/.data/
 ai-service/data/
 ai-service/models/
 client/tsconfig.tsbuildinfo
+
+# Project-local FFmpeg binaries (downloaded, not redistributed)
+tools/ffmpeg/

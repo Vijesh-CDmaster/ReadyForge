@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import http from 'node:http';
 import { createApp } from '../index';
 import { Asset } from '../models/Asset';
+import { EditComposition } from '../models/EditComposition';
 import { Project } from '../models/Project';
 import { User } from '../models/User';
 import { Workspace } from '../models/Workspace';
@@ -159,6 +160,113 @@ describe('project compositions', () => {
       }),
     });
     expect(crossProject.status).toBe(400);
+  });
+
+  it('persists multiple video, audio, and organizational text tracks in stable order', async () => {
+    const { project, asset, token } = await fixture();
+    const audio = await Asset.create({
+      workspaceId: asset.workspaceId,
+      projectId: project._id,
+      uploadedById: asset.uploadedById,
+      name: 'music.wav',
+      type: 'audio',
+      fileUrl: '/uploads/music.wav',
+      mimeType: 'audio/wav',
+      sourceDurationSeconds: 8,
+    });
+    const path = `/api/projects/${project._id}/composition`;
+    const tracks = [
+      { trackId: 'v2', name: 'Overlay', type: 'video', order: 1, hidden: false, muted: false, locked: false },
+      { trackId: 'v1', name: 'Main', type: 'video', order: 0, hidden: false, muted: false, locked: false },
+      { trackId: 'a1', name: 'Music', type: 'audio', order: 2, hidden: false, muted: true, locked: false },
+      { trackId: 't1', name: 'Titles', type: 'text', order: 3, hidden: false, muted: false, locked: true },
+    ];
+    const save = await request(path, token, {
+      method: 'PUT',
+      body: JSON.stringify({
+        schemaVersion: 2,
+        tracks,
+        clips: [
+          { assetId: asset._id, trackId: 'v1', trackType: 'video', timelineStartSeconds: 0, sourceInSeconds: 0, sourceOutSeconds: 4, order: 0 },
+          { assetId: asset._id, trackId: 'v2', trackType: 'video', timelineStartSeconds: 2, sourceInSeconds: 4, sourceOutSeconds: 6, order: 0 },
+          { assetId: audio._id, trackId: 'a1', trackType: 'audio', timelineStartSeconds: 1, sourceInSeconds: 0, sourceOutSeconds: 3, order: 0 },
+        ],
+      }),
+    });
+    expect(save.status).toBe(200);
+    const saved = (await save.json()) as {
+      composition: {
+        schemaVersion: number;
+        tracks: Array<{ trackId: string; order: number; locked: boolean }>;
+        clips: Array<{ trackId: string; durationSeconds: number; order: number }>;
+      };
+    };
+    expect(saved.composition.schemaVersion).toBe(2);
+    expect(saved.composition.tracks.map((track) => track.trackId)).toEqual(['v1', 'v2', 'a1', 't1']);
+    expect(saved.composition.tracks.find((track) => track.trackId === 't1')?.locked).toBe(true);
+    expect(saved.composition.clips.map((clip) => [clip.trackId, clip.durationSeconds])).toEqual([
+      ['v1', 4],
+      ['v2', 2],
+      ['a1', 3],
+    ]);
+
+    const reopen = await request(path, token);
+    expect(reopen.status).toBe(200);
+    const reopened = (await reopen.json()) as { composition: { tracks: unknown[]; clips: unknown[] } };
+    expect(reopened.composition.tracks).toHaveLength(4);
+    expect(reopened.composition.clips).toHaveLength(3);
+  });
+
+  it('derives tracks for a legacy v1 composition without losing clips', async () => {
+    const { project, asset, token } = await fixture();
+    await EditComposition.create({
+      projectId: project._id,
+      workspaceId: asset.workspaceId,
+      ownerId: asset.uploadedById,
+      schemaVersion: 1,
+      clips: [
+        { assetId: asset._id, trackId: 'video-1', trackType: 'video', timelineStartSeconds: 0, sourceInSeconds: 0, sourceOutSeconds: 5, durationSeconds: 5 },
+      ],
+    });
+    const read = await request(`/api/projects/${project._id}/composition`, token);
+    expect(read.status).toBe(200);
+    const body = (await read.json()) as {
+      composition: { schemaVersion: number; tracks: Array<{ trackId: string; name: string }>; clips: unknown[] };
+    };
+    expect(body.composition.schemaVersion).toBe(1);
+    expect(body.composition.clips).toHaveLength(1);
+    expect(body.composition.tracks).toEqual([
+      { trackId: 'video-1', name: 'Video 1', type: 'video', order: 0, muted: false, hidden: false, locked: false },
+    ]);
+  });
+
+  it('rejects undeclared tracks, track-type mismatches, text clips, and edits to locked tracks', async () => {
+    const { project, asset, token } = await fixture();
+    const path = `/api/projects/${project._id}/composition`;
+    const baseTrack = { trackId: 'v1', name: 'Main', type: 'video', order: 0, hidden: false, muted: false, locked: false };
+    const send = (body: object) => request(path, token, { method: 'PUT', body: JSON.stringify(body) });
+
+    expect((await send({ schemaVersion: 2, tracks: [baseTrack], clips: [{ assetId: asset._id, trackId: 'missing', trackType: 'video', timelineStartSeconds: 0, sourceInSeconds: 0, sourceOutSeconds: 2 }] })).status).toBe(400);
+    expect((await send({ schemaVersion: 2, tracks: [{ ...baseTrack, type: 'audio' }], clips: [{ assetId: asset._id, trackId: 'v1', trackType: 'video', timelineStartSeconds: 0, sourceInSeconds: 0, sourceOutSeconds: 2 }] })).status).toBe(400);
+    expect((await send({ schemaVersion: 2, tracks: [{ ...baseTrack, trackId: 't1', type: 'text' }], clips: [{ assetId: asset._id, trackId: 't1', trackType: 'text', timelineStartSeconds: 0, sourceInSeconds: 0, sourceOutSeconds: 2 }] })).status).toBe(400);
+
+    const lockedTrack = { ...baseTrack, locked: true };
+    const created = await send({ schemaVersion: 2, tracks: [lockedTrack], clips: [{ assetId: asset._id, trackId: 'v1', trackType: 'video', timelineStartSeconds: 0, sourceInSeconds: 0, sourceOutSeconds: 4 }] });
+    expect(created.status).toBe(200);
+    const revision = ((await created.json()) as { composition: { revision: number } }).composition.revision;
+    const editLocked = await request(path, token, {
+      method: 'PUT',
+      headers: { 'If-Match': String(revision) },
+      body: JSON.stringify({ schemaVersion: 2, tracks: [lockedTrack], clips: [{ assetId: asset._id, trackId: 'v1', trackType: 'video', timelineStartSeconds: 1, sourceInSeconds: 0, sourceOutSeconds: 4 }] }),
+    });
+    expect(editLocked.status).toBe(409);
+
+    const unlock = await request(path, token, {
+      method: 'PUT',
+      headers: { 'If-Match': String(revision) },
+      body: JSON.stringify({ schemaVersion: 2, tracks: [{ ...lockedTrack, locked: false }], clips: [{ assetId: asset._id, trackId: 'v1', trackType: 'video', timelineStartSeconds: 0, sourceInSeconds: 0, sourceOutSeconds: 4 }] }),
+    });
+    expect(unlock.status).toBe(200);
   });
 
   it('rejects invalid positions, ranges, overlaps, and unknown-duration trims', async () => {

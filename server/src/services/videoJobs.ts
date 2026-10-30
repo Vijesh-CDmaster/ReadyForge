@@ -15,9 +15,14 @@ import { getVideoProvider } from './videoProviderFactory';
 import { config } from '../config';
 import { recoverVideoBudgetReservations, reserveVideoBudget } from './videoBudget';
 import { refundVideoBudget, settleVideoBudget } from './videoBudget';
-import { downloadAndStoreVideoOutput, removeStoredVideoAsset } from './videoOutput';
+import { downloadAndStoreVideoOutput, removeStoredVideoAsset, storeRenderedVideoOutput } from './videoOutput';
 import { VideoProvider, VideoProviderError } from './videoProvider';
 import { BudgetReservation } from '../models/BudgetReservation';
+import { EditComposition } from '../models/EditComposition';
+import { renderComposition } from './compositionRenderer';
+import { assertVideoRenderingAvailable } from './ffmpegTools';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 const LEASE_MS = 30_000;
 const POLL_MS = 100;
@@ -51,6 +56,11 @@ export function serializeVideoJob(task: IGenerationTask) {
     costCurrency: task.costCurrency ?? null,
     ambiguousSubmission: task.ambiguousSubmission === true,
     mockOutput: task.mockOutput === true,
+    compositionId: task.compositionId?.toString() ?? null,
+    compositionRevision: task.compositionRevision ?? null,
+    outputDurationSeconds: task.outputDurationSeconds ?? null,
+    outputWidth: task.outputWidth ?? null,
+    outputHeight: task.outputHeight ?? null,
     outputText: task.outputText || null,
     errorCode: task.errorCode ?? null,
     errorMessage: task.errorMessage ?? null,
@@ -59,6 +69,100 @@ export function serializeVideoJob(task: IGenerationTask) {
     startedAt: task.startedAt ?? null,
     completedAt: task.completedAt ?? null,
   };
+}
+
+export async function submitRenderJob(params: {
+  projectId: Types.ObjectId;
+  workspaceId: Types.ObjectId;
+  userId: Types.ObjectId;
+  compositionId: Types.ObjectId;
+  compositionRevision: number;
+  idempotencyKey: string;
+}): Promise<{ task: IGenerationTask; duplicate: boolean }> {
+  const project = await Project.findById(params.projectId);
+  if (!project || project.workspaceId.toString() !== params.workspaceId.toString()) throw new ApiError(404, 'Project not found');
+  const composition = await EditComposition.findOne({
+    _id: params.compositionId,
+    projectId: project._id,
+    workspaceId: params.workspaceId,
+  });
+  if (!composition || composition.__v !== params.compositionRevision) {
+    throw new ApiError(409, 'Save the current composition before rendering.');
+  }
+  const contract = await ProductionContract.findOne({
+    projectId: project._id,
+    status: { $in: ['approved', 'locked'] },
+  }).sort('-version');
+  if (!contract) throw new ApiError(409, 'An approved or locked Production Contract is required.');
+  const [inputs, conflicts, assets] = await Promise.all([
+    KnowledgeInput.find({ projectId: project._id }),
+    Conflict.find({ projectId: project._id }),
+    Asset.find({ projectId: project._id, workspaceId: params.workspaceId }),
+  ]);
+  const authorization = evaluateProductionAuthorization({
+    project,
+    inputs,
+    conflicts,
+    assets,
+    contract,
+    stage: 'final',
+    estimatedCost: 0,
+  });
+  if (!authorization.authorized) throw new ApiError(409, authorizationMessage(authorization));
+
+  const requestFingerprint = fingerprintJob({
+    stage: 'render',
+    mode: 'render',
+    contractVersion: contract.version,
+  });
+  const existing = await GenerationTask.findOne({ projectId: project._id, idempotencyKey: params.idempotencyKey });
+  if (existing) {
+    if (existing.requestFingerprint !== requestFingerprint) throw new ApiError(409, 'Idempotency key was already used for a different request.');
+    return { task: existing, duplicate: true };
+  }
+  try {
+    const task = await GenerationTask.create({
+      projectId: project._id,
+      workspaceId: params.workspaceId,
+      contractId: contract._id,
+      contractVersion: contract.version,
+      createdById: params.userId,
+      taskType: 'render',
+      stage: 'final',
+      status: 'queued',
+      attempt: 1,
+      inputPrompt: `Render saved composition revision ${params.compositionRevision}`,
+      estimatedCost: 0,
+      actualCost: 0,
+      idempotencyKey: params.idempotencyKey,
+      requestFingerprint,
+      correlationId: crypto.randomUUID(),
+      providerId: 'ffmpeg',
+      costCurrency: project.budget.currency,
+      compositionId: composition._id,
+      compositionRevision: params.compositionRevision,
+      maxAttempts: DEFAULT_MAX_ATTEMPTS,
+      // Keep the task unclaimable until its budget reservation is attached.
+      nextAttemptAt: new Date(Date.now() + 30_000),
+    });
+    const reservation = await reserveVideoBudget({
+      projectId: project._id,
+      generationTaskId: task._id,
+      key: `render:${task._id.toString()}`,
+      amount: 0,
+      currency: project.budget.currency,
+    });
+    task.budgetReservationId = reservation._id;
+    task.nextAttemptAt = new Date();
+    await task.save();
+    return { task, duplicate: false };
+  } catch (error) {
+    if ((error as { code?: number }).code !== 11000) throw error;
+    const existingTask = await GenerationTask.findOne({ projectId: project._id, idempotencyKey: params.idempotencyKey });
+    if (!existingTask) throw error;
+    if (existingTask.requestFingerprint !== requestFingerprint) throw new ApiError(409, 'Idempotency key was already used for a different request.');
+    return { task: existingTask, duplicate: true };
+  }
 }
 
 const MONEY_SCALE = 100;
@@ -560,6 +664,138 @@ export async function processRealProviderJob(
   throw new VideoProviderError('Provider polling timed out.', 'timeout', true);
 }
 
+async function processRenderJob(
+  task: IGenerationTask,
+  project: IProject,
+  contract: IProductionContract,
+  leaseId: string
+): Promise<void> {
+  if (!task.compositionId || task.compositionRevision === undefined) {
+    throw new VideoProviderError('Render task composition metadata is incomplete.', 'validation', false);
+  }
+  // Local rendering is only permitted when verified FFmpeg/FFprobe binaries exist.
+  // A missing toolchain fails the job; it never produces a placeholder MP4.
+  await assertVideoRenderingAvailable();
+  const composition = await EditComposition.findOne({
+    _id: task.compositionId,
+    projectId: task.projectId,
+    workspaceId: task.workspaceId,
+  });
+  if (!composition || composition.__v !== task.compositionRevision) {
+    throw new VideoProviderError('The saved composition changed before rendering.', 'validation', false);
+  }
+  const authorization = await revalidateVideoJobAuthorization(task, project, contract);
+  if (!authorization.authorized) {
+    throw new VideoProviderError(authorizationMessage(authorization), 'validation', false);
+  }
+  const assets = await Asset.find({
+    _id: { $in: composition.clips.map((clip) => clip.assetId) },
+    projectId: project._id,
+    workspaceId: task.workspaceId,
+    type: { $in: ['video', 'audio'] },
+  });
+  if (assets.length !== new Set(composition.clips.map((clip) => clip.assetId.toString())).size) {
+    throw new VideoProviderError('A composition source asset is unavailable.', 'validation', false);
+  }
+  if (!(await heartbeat(task._id, leaseId, 5, 'preparing render'))) {
+    throw new VideoProviderError('The render worker lease was lost.', 'validation', false);
+  }
+
+  const workDir = path.resolve(config.dataDir, 'renders', task._id.toString());
+  // FFmpeg renders can outlive the 30s worker lease, so renew it while the
+  // child process runs. Publishing still re-checks the lease afterwards.
+  let leaseLost = false;
+  const leaseTimer = setInterval(() => {
+    void heartbeat(task._id, leaseId, 50, 'rendering with FFmpeg')
+      .then((ok) => {
+        if (!ok) leaseLost = true;
+      })
+      .catch(() => {
+        leaseLost = true;
+      });
+  }, Math.max(5_000, Math.floor(LEASE_MS / 3)));
+  leaseTimer.unref?.();
+  try {
+    const result = await renderComposition({ composition, assets, workDir });
+    if (leaseLost) {
+      throw new VideoProviderError('The render worker lease was lost during FFmpeg rendering.', 'validation', false);
+    }
+    if (!(await heartbeat(task._id, leaseId, 95, 'validating render'))) {
+      throw new VideoProviderError('The render worker lease was lost before publishing output.', 'validation', false);
+    }
+    const currentTask = await GenerationTask.findOne({
+      _id: task._id,
+      status: 'running',
+      leaseId,
+      leaseExpiresAt: { $gt: new Date() },
+      compositionRevision: task.compositionRevision,
+      outputAssetId: { $exists: false },
+    }).lean();
+    if (!currentTask) throw new VideoProviderError('The render worker lease is no longer valid.', 'validation', false);
+
+    const outputAssetId = await storeRenderedVideoOutput({
+      sourcePath: result.outputPath,
+      taskId: task._id,
+      projectId: task.projectId,
+      workspaceId: task.workspaceId!,
+      uploadedById: task.createdById,
+      durationSeconds: result.durationSeconds,
+      width: result.width,
+      height: result.height,
+    });
+    try {
+      let settled = false;
+      if (task.budgetReservationId) {
+        await settleVideoBudget({ reservationId: task.budgetReservationId, actualAmount: 0 });
+        settled = true;
+      }
+      const completed = await GenerationTask.updateOne(
+        { _id: task._id, status: 'running', leaseId, leaseExpiresAt: { $gt: new Date() }, outputAssetId: { $exists: false } },
+        {
+          $set: {
+            status: 'requires_approval',
+            providerStatus: 'succeeded',
+            outputAssetId,
+            actualCost: 0,
+            progress: 100,
+            currentStage: 'rendered output ready for review',
+            outputDurationSeconds: result.durationSeconds,
+            outputWidth: result.width,
+            outputHeight: result.height,
+            completedAt: new Date(),
+          },
+          $unset: { leaseId: 1, leaseExpiresAt: 1, heartbeatAt: 1 },
+        }
+      );
+      if (completed.modifiedCount !== 1) {
+        await removeStoredVideoAsset(outputAssetId);
+        throw new VideoProviderError(
+          settled
+            ? 'The render reservation was settled, but the task could not be completed; manual reconciliation is required.'
+            : 'The render lease changed before output publication.',
+          'validation',
+          false
+        );
+      }
+    } catch (error) {
+      await removeStoredVideoAsset(outputAssetId).catch(() => undefined);
+      throw error;
+    }
+    audit({
+      workspaceId: task.workspaceId!.toString(),
+      projectId: task.projectId.toString(),
+      actorType: 'system',
+      action: 'video_render.completed',
+      entityType: 'generation_task',
+      entityId: task._id.toString(),
+      after: { compositionRevision: task.compositionRevision, outputAssetId: outputAssetId.toString(), durationSeconds: result.durationSeconds },
+    });
+  } finally {
+    clearInterval(leaseTimer);
+    await fs.rm(workDir, { recursive: true, force: true });
+  }
+}
+
 async function processJob(task: IGenerationTask): Promise<void> {
   const leaseId = task.leaseId;
   if (!leaseId || !task.workspaceId || !task.contractVersion) {
@@ -579,6 +815,10 @@ async function processJob(task: IGenerationTask): Promise<void> {
       status: { $in: ['approved', 'locked'] },
     });
     if (!contract) throw new MockProviderError('The captured Production Contract is no longer approved.', 'MOCK_PERMANENT', false);
+    if (task.taskType === 'render' || task.providerId === 'ffmpeg') {
+      await processRenderJob(task, project, contract, leaseId);
+      return;
+    }
     if (task.providerId && task.providerId !== 'mock') {
       await processRealProviderJob(task, project, contract, leaseId);
       return;

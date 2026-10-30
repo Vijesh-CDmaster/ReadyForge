@@ -36,6 +36,9 @@ export const config = {
   localAiUrl: (process.env.LOCAL_AI_URL || '').replace(/\/+$/, ''),
   video: {
     provider: process.env.VIDEO_PROVIDER || 'mock',
+    // Local, free software only. Empty values fall back to PATH resolution.
+    ffmpegPath: process.env.FFMPEG_PATH?.trim() || 'ffmpeg',
+    ffprobePath: process.env.FFPROBE_PATH?.trim() || 'ffprobe',
     runwayApiKey: process.env.RUNWAY_API_KEY || '',
     runwayBaseUrl: (process.env.RUNWAY_BASE_URL || 'https://api.dev.runwayml.com').replace(/\/+$/, ''),
     runwayModel: process.env.RUNWAY_MODEL || 'gen4.5',
@@ -43,6 +46,7 @@ export const config = {
     currency: process.env.VIDEO_COST_CURRENCY || 'USD',
     maxCost: num(process.env.VIDEO_MAX_COST_USD, 0),
     requestTimeoutMs: num(process.env.VIDEO_PROVIDER_TIMEOUT_MS, 30_000),
+    renderTimeoutMs: num(process.env.VIDEO_RENDER_TIMEOUT_MS, 300_000),
     pollInitialMs: num(process.env.VIDEO_POLL_INITIAL_MS, 2_000),
     pollMaxMs: num(process.env.VIDEO_POLL_MAX_MS, 15_000),
   },

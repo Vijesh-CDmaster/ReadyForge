@@ -1,7 +1,7 @@
 import { Schema, model, Types } from 'mongoose';
 import { LADDER_STAGES } from './Project';
 
-export const TASK_TYPES = ['outline', 'script', 'storyboard', 'preview', 'final', 'verification'] as const;
+export const TASK_TYPES = ['outline', 'script', 'storyboard', 'preview', 'final', 'render', 'verification'] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 
 export const TASK_STATUSES = ['queued', 'running', 'completed', 'failed', 'cancelled', 'requires_approval'] as const;
@@ -77,6 +77,11 @@ export interface IGenerationTask {
   timeoutAt?: Date;
   outputAssetId?: Types.ObjectId;
   ambiguousSubmission?: boolean;
+  compositionId?: Types.ObjectId;
+  compositionRevision?: number;
+  outputDurationSeconds?: number;
+  outputWidth?: number;
+  outputHeight?: number;
 }
 
 const generationTaskSchema = new Schema<IGenerationTask>(
@@ -131,6 +136,11 @@ const generationTaskSchema = new Schema<IGenerationTask>(
     timeoutAt: { type: Date },
     outputAssetId: { type: Schema.Types.ObjectId, ref: 'Asset' },
     ambiguousSubmission: { type: Boolean, default: false },
+    compositionId: { type: Schema.Types.ObjectId, ref: 'EditComposition' },
+    compositionRevision: { type: Number, min: 0 },
+    outputDurationSeconds: { type: Number, min: 0 },
+    outputWidth: { type: Number, min: 1 },
+    outputHeight: { type: Number, min: 1 },
   },
   { timestamps: true }
 );
