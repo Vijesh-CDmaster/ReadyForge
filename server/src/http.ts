@@ -22,7 +22,20 @@ export class ApiError extends Error {
 export const asyncHandler =
   <T extends (req: any, res: Response, next?: any) => Promise<unknown>>(fn: T) =>
   (req: any, res: Response, next: any) =>
-    Promise.resolve(fn(req, res, next)).catch(next);
+    Promise.resolve(fn(req, res, next)).catch((err) => {
+      try {
+        next(err);
+      } catch (e) {
+        console.error('[asyncHandler] failed to pass error to next:', e);
+        if (!res.headersSent) {
+          try {
+            res.status(500).json({ error: 'Internal server error' });
+          } catch {
+            // ignore
+          }
+        }
+      }
+    });
 
 export function validateBody<S extends ZodTypeAny>(schema: S, data: unknown): z.output<S> {
   const result = schema.safeParse(data);
@@ -45,52 +58,67 @@ function response(res: Response, status: number, error: string, requestId: strin
 }
 
 export function errorHandler(err: unknown, req: Request, res: Response, _next: any) {
-  const id = req.requestId || `rf-${randomUUID()}`;
-  if (err instanceof ApiError) {
-    return response(res, err.status, err.message, id, err.details);
+  try {
+    const id = req.requestId || `rf-${randomUUID()}`;
+    if (res.headersSent) {
+      console.error(`[error ${id}] headers already sent:`, err);
+      return;
+    }
+    if (err instanceof ApiError) {
+      return response(res, err.status, err.message, id, err.details);
+    }
+    const e = err as {
+      code?: number | string;
+      name?: string;
+      message?: string;
+      status?: number;
+      statusCode?: number;
+    };
+    if (e?.code === 11000) {
+      return response(res, 409, 'Duplicate value — record already exists.', id);
+    }
+    if (e?.name === 'CastError') {
+      return response(res, 400, 'Invalid id format.', id);
+    }
+    // Optimistic-concurrency conflict (Workspace uses `optimisticConcurrency`):
+    // another writer won the race — safe to tell the client to retry.
+    if (e?.name === 'VersionError') {
+      return response(res, 409, 'Record was modified concurrently — please retry.', id);
+    }
+    // Multer upload errors: oversize → 413, anything else → 400. Never a 500.
+    if (e?.name === 'MulterError') {
+      const tooLarge = e.code === 'LIMIT_FILE_SIZE';
+      return response(
+        res,
+        tooLarge ? 413 : 400,
+        tooLarge
+          ? `File exceeds the ${config.upload.maxMb}MB upload limit.`
+          : `Upload failed: ${String(e.code || 'unknown error')}`,
+        id
+      );
+    }
+    // Body-parser / JSON syntax errors carry status 400 — honour any 4xx the
+    // underlying library already decided instead of turning it into a 500.
+    const libStatus = e?.status ?? e?.statusCode;
+    if (typeof libStatus === 'number' && libStatus >= 400 && libStatus < 500) {
+      return response(res, libStatus, e.message || 'Invalid request', id);
+    }
+    if (e?.name === 'MongoServerSelectionError' || e?.name === 'MongoNetworkError' || e?.name === 'MongooseServerSelectionError') {
+      console.error(`[error ${id}] database unavailable`, err);
+      return response(res, 503, 'Database temporarily unavailable. Please try again.', id);
+    }
+    console.error(`[error ${id}]`, err);
+    // Never echo internal error messages: they can contain connection strings,
+    // credentials or stack fragments. Details stay in the server log.
+    return response(res, 500, 'Internal server error', id);
+  } catch (handlerErr) {
+    console.error('[errorHandler] failed to handle error:', handlerErr);
+    if (!res.headersSent) {
+      try {
+        res.status(500).json({ error: 'Internal server error' });
+      } catch {
+        // ignore
+      }
+    }
   }
-  const e = err as {
-    code?: number | string;
-    name?: string;
-    message?: string;
-    status?: number;
-    statusCode?: number;
-  };
-  if (e?.code === 11000) {
-    return response(res, 409, 'Duplicate value — record already exists.', id);
-  }
-  if (e?.name === 'CastError') {
-    return response(res, 400, 'Invalid id format.', id);
-  }
-  // Optimistic-concurrency conflict (Workspace uses `optimisticConcurrency`):
-  // another writer won the race — safe to tell the client to retry.
-  if (e?.name === 'VersionError') {
-    return response(res, 409, 'Record was modified concurrently — please retry.', id);
-  }
-  // Multer upload errors: oversize → 413, anything else → 400. Never a 500.
-  if (e?.name === 'MulterError') {
-    const tooLarge = e.code === 'LIMIT_FILE_SIZE';
-    return response(
-      res,
-      tooLarge ? 413 : 400,
-      tooLarge
-        ? `File exceeds the ${config.upload.maxMb}MB upload limit.`
-        : `Upload failed: ${String(e.code || 'unknown error')}`,
-      id
-    );
-  }
-  // Body-parser / JSON syntax errors carry status 400 — honour any 4xx the
-  // underlying library already decided instead of turning it into a 500.
-  const libStatus = e?.status ?? e?.statusCode;
-  if (typeof libStatus === 'number' && libStatus >= 400 && libStatus < 500) {
-    return response(res, libStatus, e.message || 'Invalid request', id);
-  }
-  if (e?.name === 'MongoServerSelectionError' || e?.name === 'MongoNetworkError' || e?.name === 'MongooseServerSelectionError') {
-    console.error(`[error ${id}] database unavailable`, err);
-    return response(res, 503, 'Database temporarily unavailable. Please try again.', id);
-  }
-  console.error(`[error ${id}]`, err);
-  // Never echo internal error messages: they can contain connection strings,
-  // credentials or stack fragments. Details stay in the server log.
-  return response(res, 500, 'Internal server error', id);
 }

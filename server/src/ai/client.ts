@@ -93,46 +93,60 @@ export async function aiJson<T>(opts: {
   // "You are ReadyForge's Input Collection Agent.") — safe to log, never user content.
   const task = system.split('\n', 1)[0].trim().slice(0, 80);
 
+  const safeFallback = (): T => {
+    try {
+      return fallback();
+    } catch (err) {
+      console.error('[ai] fallback threw:', err);
+      throw err;
+    }
+  };
+
   if (!isAiConfigured()) {
-    return { data: fallback(), source: 'rule_engine', model: 'readyforge-rules' };
+    return { data: safeFallback(), source: 'rule_engine', model: 'readyforge-rules' };
   }
 
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 60_000);
-    const res = await fetch(`${config.ai.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.ai.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: config.ai.model,
-        temperature,
-        messages: [
-          { role: 'system', content: `${system}\nRespond with valid JSON only. No markdown, no prose.` },
-          { role: 'user', content: user },
-        ],
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
+    try {
+      const res = await fetch(`${config.ai.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${config.ai.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: config.ai.model,
+          temperature,
+          messages: [
+            { role: 'system', content: `${system}\nRespond with valid JSON only. No markdown, no prose.` },
+            { role: 'user', content: user },
+          ],
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
 
-    if (!res.ok) throw new Error(`AI provider returned ${res.status}`);
-    const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const content = body.choices?.[0]?.message?.content ?? '';
+      if (!res.ok) throw new Error(`AI provider returned ${res.status}`);
+      const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      const content = body.choices?.[0]?.message?.content ?? '';
 
-    const parsed = tryParseJson<T>(content);
-    if (parsed.ok) {
-      return { data: parsed.data, source: 'ai', model: config.ai.model };
+      const parsed = tryParseJson<T>(content);
+      if (parsed.ok) {
+        return { data: parsed.data, source: 'ai', model: config.ai.model };
+      }
+      console.warn(
+        `[ai] response parse failed — using rule engine | task=${task} | error=${parsed.error} | contentLength=${content.length}`
+      );
+      return { data: safeFallback(), source: 'rule_engine', model: 'readyforge-rules' };
+    } catch (err) {
+      clearTimeout(timer);
+      throw err;
     }
-    console.warn(
-      `[ai] response parse failed — using rule engine | task=${task} | error=${parsed.error} | contentLength=${content.length}`
-    );
-    return { data: fallback(), source: 'rule_engine', model: 'readyforge-rules' };
   } catch (err) {
     console.warn('[ai] call failed, using rule engine:', (err as Error).message);
-    return { data: fallback(), source: 'rule_engine', model: 'readyforge-rules' };
+    return { data: safeFallback(), source: 'rule_engine', model: 'readyforge-rules' };
   }
 }
 

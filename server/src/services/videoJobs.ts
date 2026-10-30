@@ -959,10 +959,14 @@ export class VideoJobWorker {
   private async tick(): Promise<void> {
     if (this.stopping) return;
     this.activeTick = (async () => {
-      await recoverStaleJobs();
-      await recoverVideoBudgetReservations();
-      const task = await claimJob(this.workerId);
-      if (task) await processJob(task);
+      try {
+        await recoverStaleJobs();
+        await recoverVideoBudgetReservations();
+        const task = await claimJob(this.workerId);
+        if (task) await processJob(task);
+      } catch (err) {
+        console.error('[video-worker] tick failed:', err);
+      }
       if (!this.stopping) this.timer = setTimeout(() => void this.tick(), POLL_MS);
     })();
     try {

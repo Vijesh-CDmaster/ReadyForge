@@ -143,6 +143,13 @@ async function main() {
   process.once('SIGTERM', shutdown);
 }
 
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+});
+
 if (require.main === module) {
   main().catch((err) => {
     console.error('Fatal startup error:', err);
